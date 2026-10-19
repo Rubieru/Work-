@@ -44,6 +44,11 @@ jobs:
           $log = Join-Path $env:APPDATA "Luftbild-Editor\protokoll.txt"
           if (Test-Path $log) { Write-Host "--- Protokoll ---"; Get-Content $log }
           exit $p.ExitCode
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Selbsttest-Bildschirmfotos
+          path: selbsttest_*.png
       - uses: actions/upload-artifact@v4
         with:
           name: Luftbild-Editor-Windows

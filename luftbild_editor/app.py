@@ -61,8 +61,17 @@ def setup_logging() -> str:
     return path
 
 
+def _viewport_contrast(win) -> float:
+    """Standardabweichung der sichtbaren Pixel in der Bildansicht (0 = leer)."""
+    import numpy as np
+    from PySide6.QtGui import QImage
+    img = win.view.viewport().grab().toImage().convertToFormat(QImage.Format_Grayscale8)
+    a = np.frombuffer(img.constBits(), np.uint8).reshape(img.height(), img.bytesPerLine())
+    return float(a[:, :img.width()].std())
+
+
 def self_test(win, app, image, report) -> int:
-    """Startet das Programm, lädt ein Bild und prüft, ob die Vorschau erscheint."""
+    """Startet das Programm, lädt ein Bild und prüft, ob die Vorschau sichtbar ist."""
     from PySide6.QtCore import QThreadPool
 
     def wait(seconds=60):
@@ -71,36 +80,57 @@ def self_test(win, app, image, report) -> int:
             QThreadPool.globalInstance().waitForDone(100)
             app.processEvents()
             if QThreadPool.globalInstance().activeThreadCount() == 0:
-                for _ in range(10):
+                for _ in range(20):
                     app.processEvents()
                     time.sleep(0.02)
                 if QThreadPool.globalInstance().activeThreadCount() == 0:
                     return
 
     lines, ok = [], True
+    shots = os.path.dirname(os.path.abspath(report))
 
-    def check(name, cond):
+    def check(name, cond, info=""):
         nonlocal ok
         ok &= bool(cond)
-        lines.append(f"{'OK    ' if cond else 'FEHLER'} {name}")
+        lines.append(f"{'OK    ' if cond else 'FEHLER'} {name} {info}")
+
+    def shot(name):
+        win.grab().save(os.path.join(shots, f"selbsttest_{name}.png"))
 
     win.add_files([image])
     wait(120)
     check("Bild geladen", win.doc is not None)
+    win.tabs.setCurrentIndex(0)
+    win._on_tab(0)
+    wait()
+    c = _viewport_contrast(win)
+    check("Bild im Zuschneiden sichtbar", c > 3, f"(Kontrast {c:.1f})")
+    shot("1_zuschneiden")
+    w, h = win.doc.size
+    for sb, v in zip(win.spin_crop, (w // 50, 0, w - w // 25, h - h // 40)):
+        sb.setValue(v)
+    win.sl_rotation.setValue(0.3)
+    win.sl_rotation.valueChanged.emit(0.3)
+    wait()
     win.tabs.setCurrentIndex(1)
     wait()
-    check("Vorschau angezeigt", not win.view.pix_item.pixmap().isNull())
+    check("Vorschau berechnet", not win.view.pix_item.pixmap().isNull())
     check("Histogramm berechnet", win.histogram._after is not None)
-    item = win.preset_list.item(1)
-    win._apply_preset_item(item)
+    c = _viewport_contrast(win)
+    check("Vorschau sichtbar", c > 3, f"(Kontrast {c:.1f})")
+    shot("2_verbessern")
+    win._apply_preset_item(win.preset_list.item(1))
     wait()
     check("Voreinstellung angewendet", win.entry.settings.stretch)
-    check("Vorschau nach Voreinstellung", not win.view.pix_item.pixmap().isNull())
+    c = _viewport_contrast(win)
+    check("Vorschau nach Voreinstellung sichtbar", c > 3, f"(Kontrast {c:.1f})")
+    shot("3_voreinstellung")
     win.view.actual_size()
     wait()
     win._render_detail()
     wait()
     check("Detailansicht 100 %", win.view.detail_item.isVisible())
+    shot("4_detail")
     with open(report, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     return 0 if ok else 1
