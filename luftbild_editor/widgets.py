@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import (QDoubleSpinBox, QGraphicsPixmapItem, QGraphicsScene,
                                QGraphicsView, QHBoxLayout, QLabel, QSlider, QVBoxLayout,
@@ -141,6 +141,7 @@ class ImageView(QGraphicsView):
     viewChanged = Signal()
     cropChanged = Signal(tuple)
     pixelHovered = Signal(int, int)
+    cornerStep = Signal(int)  # Zwei-Klick-Modus: 1 = erste Ecke gesetzt, 2 = fertig
 
     HANDLE = 9  # Bildschirmpixel
 
@@ -165,6 +166,14 @@ class ImageView(QGraphicsView):
         self.crop_rect = QRectF()
         self.aspect: float | None = None
         self.show_grid = False
+        self.size_locked = False
+        self.corner_mode = False
+        self._corner_a = None
+        self._hover = None
+        self.loupe = QLabel(self)
+        self.loupe.setFixedSize(176, 176)
+        self.loupe.setStyleSheet("background: #222;")
+        self.loupe.hide()
         self._drag = None
         self._pan = None
         self._img_size = (0, 0)
@@ -299,11 +308,16 @@ class ImageView(QGraphicsView):
                 int(round(r.width())), int(round(r.height())))
 
     # ---------------------------------------------------------------- Maus
+    HIT = 16  # Fangbereich der Anfasser in Bildschirmpixeln
+
     def _hit(self, pos) -> str | None:
         if self.crop_rect.isEmpty():
             return None
         r = self.mapFromScene(self.crop_rect).boundingRect()
-        t = self.HANDLE
+        if self.size_locked:
+            return "move" if r.adjusted(-self.HIT, -self.HIT, self.HIT, self.HIT).contains(pos) \
+                else None
+        t = self.HIT
         x, y = pos.x(), pos.y()
         near_l, near_r = abs(x - r.left()) <= t, abs(x - r.right()) <= t
         near_t, near_b = abs(y - r.top()) <= t, abs(y - r.bottom()) <= t
@@ -328,7 +342,16 @@ class ImageView(QGraphicsView):
                 "r": Qt.SizeHorCursor, "tl": Qt.SizeFDiagCursor, "br": Qt.SizeFDiagCursor,
                 "tr": Qt.SizeBDiagCursor, "bl": Qt.SizeBDiagCursor, "move": Qt.SizeAllCursor}
 
+    def set_corner_mode(self, on: bool):
+        """Zwei-Klick-Modus: 1. Klick = obere linke Ecke, 2. Klick = untere rechte Ecke."""
+        self.corner_mode = on
+        self._corner_a = None
+        self.loupe.setVisible(on)
+        self.viewport().setCursor(Qt.CrossCursor)
+        self.viewport().update()
+
     def mousePressEvent(self, e):
+        pos = e.position().toPoint()
         if e.button() in (Qt.MiddleButton, Qt.RightButton) or (
                 self.mode == "crop" and e.button() == Qt.LeftButton
                 and e.modifiers() & Qt.ControlModifier):
@@ -336,18 +359,46 @@ class ImageView(QGraphicsView):
             self.viewport().setCursor(Qt.ClosedHandCursor)
             return
         if self.mode == "crop" and e.button() == Qt.LeftButton and self._has_image:
-            sp = self.mapToScene(e.position().toPoint())
-            hit = self._hit(e.position().toPoint())
-            if hit is None:
+            sp = self.mapToScene(pos)
+            if self.corner_mode:
                 p = self._snap(sp)
-                self._drag = ("new", p, QRectF(p, p))
+                if self._corner_a is None:
+                    self._corner_a = p
+                    self.cornerStep.emit(1)
+                else:
+                    a = self._corner_a
+                    self.crop_rect = QRectF(a, p).normalized()
+                    self._corner_a = None
+                    self.set_corner_mode(False)
+                    self.cropChanged.emit(self.crop_tuple())
+                    self.cornerStep.emit(2)
+                self.viewport().update()
+                return
+            hit = self._hit(pos)
+            if hit is None:
+                # Neben den Rahmen geklickt: nur mit Umschalttaste einen neuen Rahmen
+                # aufziehen, sonst das Bild verschieben – so verrutscht nichts aus Versehen.
+                if e.modifiers() & Qt.ShiftModifier or self.crop_rect.isEmpty() \
+                        or self._is_full_crop():
+                    p = self._snap(sp)
+                    self._drag = ("new", p, QRectF(p, p))
+                else:
+                    self._pan = e.position()
+                    self.viewport().setCursor(Qt.ClosedHandCursor)
+                    return
             else:
                 self._drag = (hit, sp, QRectF(self.crop_rect))
+            self._update_loupe(pos)
             return
         super().mousePressEvent(e)
 
+    def _is_full_crop(self) -> bool:
+        w, h = self._img_size
+        return self.crop_rect == QRectF(0, 0, w, h)
+
     def mouseMoveEvent(self, e):
-        sp = self.mapToScene(e.position().toPoint())
+        pos = e.position().toPoint()
+        sp = self.mapToScene(pos)
         self.pixelHovered.emit(int(np.floor(sp.x())), int(np.floor(sp.y())))
         if self._pan is not None:
             d = e.position() - self._pan
@@ -358,8 +409,13 @@ class ImageView(QGraphicsView):
         if self.mode == "crop":
             if self._drag:
                 self._drag_to(sp)
+                self._update_loupe(pos)
+            elif self.corner_mode:
+                self._hover = self._snap(sp)
+                self._update_loupe(pos)
+                self.viewport().update()
             else:
-                hit = self._hit(e.position().toPoint())
+                hit = self._hit(pos)
                 self.viewport().setCursor(self._CURSORS.get(hit, Qt.CrossCursor))
             return
         super().mouseMoveEvent(e)
@@ -371,11 +427,35 @@ class ImageView(QGraphicsView):
             return
         if self.mode == "crop" and self._drag:
             self._drag = None
+            if not self.corner_mode:
+                self.loupe.hide()
             if self.crop_rect.width() < 1 or self.crop_rect.height() < 1:
                 self.set_crop(None)
             self.cropChanged.emit(self.crop_tuple())
             return
         super().mouseReleaseEvent(e)
+
+    def _update_loupe(self, pos):
+        """Lupe: 4-fach vergrößerter Ausschnitt um den Mauszeiger (pixelgenaues Setzen)."""
+        n = 44
+        src = self.viewport().grab(QRect(pos.x() - n // 2, pos.y() - n // 2, n, n))
+        size = self.loupe.width()
+        pm = src.scaled(size, size, Qt.IgnoreAspectRatio, Qt.FastTransformation)
+        p = QPainter(pm)
+        p.setPen(QPen(ACCENT, 1))
+        c = size // 2
+        p.drawLine(c, 0, c, size)
+        p.drawLine(0, c, size, c)
+        p.setPen(QPen(ACCENT, 2))
+        p.drawRect(0, 0, size - 1, size - 1)
+        p.end()
+        self.loupe.setPixmap(pm)
+        # Lupe in die Ecke, die vom Mauszeiger am weitesten weg ist
+        vw, vh = self.viewport().width(), self.viewport().height()
+        x = 10 if pos.x() > vw / 2 else vw - size - 10
+        y = 10 if pos.y() > vh / 2 else vh - size - 10
+        self.loupe.move(x, y)
+        self.loupe.show()
 
     def _snap(self, p: QPointF) -> QPointF:
         w, h = self._img_size
@@ -396,16 +476,17 @@ class ImageView(QGraphicsView):
             if self.aspect:
                 r = self._fit_aspect(r, start, p)
         else:
+            # Gegenüberliegende Ecke/Kante bleibt fest
             left, top, right, bottom = orig.left(), orig.top(), orig.right(), orig.bottom()
             if "l" in kind:
-                left = p.x()
+                left = min(p.x(), right - 1)
             if "r" in kind:
-                right = p.x()
+                right = max(p.x(), left + 1)
             if "t" in kind:
-                top = p.y()
+                top = min(p.y(), bottom - 1)
             if "b" in kind:
-                bottom = p.y()
-            r = QRectF(QPointF(left, top), QPointF(right, bottom)).normalized()
+                bottom = max(p.y(), top + 1)
+            r = QRectF(QPointF(left, top), QPointF(right, bottom))
             if self.aspect:
                 if kind in ("t", "b"):
                     nw = round(r.height() * self.aspect)
@@ -472,7 +553,20 @@ class ImageView(QGraphicsView):
         painter.drawRect(cr)
         hs = self.HANDLE / z
         painter.setBrush(ACCENT)
-        for px in (cr.left(), cr.center().x(), cr.right()):
+        handles = () if self.size_locked or self.corner_mode else \
+            (cr.left(), cr.center().x(), cr.right())
+        # Zwei-Klick-Modus: gesetzte erste Ecke und Vorschau des Rahmens
+        if self.corner_mode and self._corner_a is not None:
+            a = self._corner_a
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(ACCENT, 0, Qt.DashLine))
+            if self._hover is not None:
+                painter.drawRect(QRectF(a, self._hover).normalized())
+            painter.setPen(QPen(ACCENT, 0))
+            painter.drawLine(QPointF(a.x() - 12 / z, a.y()), QPointF(a.x() + 12 / z, a.y()))
+            painter.drawLine(QPointF(a.x(), a.y() - 12 / z), QPointF(a.x(), a.y() + 12 / z))
+            painter.setBrush(ACCENT)
+        for px in handles:
             for py in (cr.top(), cr.center().y(), cr.bottom()):
                 if px == cr.center().x() and py == cr.center().y():
                     continue

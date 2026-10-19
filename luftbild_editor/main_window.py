@@ -86,14 +86,16 @@ class MainWindow(QMainWindow):
         self._crop_levels = (0.0, 1.0)
         self._show_before = False
         self._gen = {"preview": 0, "detail": 0, "thumbs": 0, "load": 0}
-        self._busy = {"preview": False, "detail": False}
-        self._pending = {"preview": False, "detail": False}
+        self._busy = {"preview": False, "detail": False, "thumbs": False}
+        self._pending = {"preview": False, "detail": False, "thumbs": False}
+        self._thumbs_geometry = None
         self._preview_scale = 1.0
         self._last_geometry = None
         self._progress = None
         self._errors_shown = set()
         self._auto_cache = None
         self._last_preset_auto = False
+        self._last_crop_size = None
 
         self.pool = QThreadPool.globalInstance()
         self.sig = _Signals()
@@ -116,6 +118,7 @@ class MainWindow(QMainWindow):
         self._t_loading.timeout.connect(self._tick_loading)
         self.view.viewChanged.connect(self._on_view_changed)
 
+        self._on_lock_size(self.chk_lock_size.isChecked())
         QApplication.instance().installEventFilter(self)
         self._update_enabled()
 
@@ -209,6 +212,7 @@ class MainWindow(QMainWindow):
         # ---- Mitte: Ansicht
         self.view = ImageView()
         self.view.cropChanged.connect(self._on_view_crop)
+        self.view.cornerStep.connect(self._on_corner_step)
         self.view.pixelHovered.connect(self._on_hover)
         empty = QLabel("Luftbild hierher ziehen\noder „Bilder öffnen…“ klicken")
         empty.setAlignment(Qt.AlignCenter)
@@ -288,12 +292,32 @@ class MainWindow(QMainWindow):
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.addWidget(self._info(
-            "Rahmen mit der linken Maustaste aufziehen, an Ecken und Kanten anpassen "
-            "oder die Werte unten exakt eingeben.\n\n"
-            "Mausrad: zoomen (bei starker Vergrößerung erscheint ein Pixelraster). "
-            "Rechte Maustaste: Bild verschieben.\n\n"
-            "Der Zuschnitt wird sofort übernommen – kein Bestätigen nötig. Unter "
-            "„2 Verbessern“ und beim Speichern wird nur noch der Ausschnitt verwendet."))
+            "Schnellster Weg: „Ecken setzen“ klicken, dann obere linke und untere rechte "
+            "Ecke anklicken (die Lupe hilft beim genauen Treffen).\n"
+            "Danach Ecken oder Kanten ziehen – die gegenüberliegende Seite bleibt fest. "
+            "Neuen Rahmen aufziehen: Umschalttaste + ziehen.\n"
+            "Mausrad: zoomen. Rechte Maustaste: Bild verschieben. Der Zuschnitt gilt "
+            "sofort, ohne Bestätigen."))
+
+        g0 = QGroupBox("Rahmen")
+        l0 = QVBoxLayout(g0)
+        self.btn_corners = QPushButton("Ecken setzen (2 Klicks)")
+        self.btn_corners.setObjectName("primary")
+        self.btn_corners.setCheckable(True)
+        self.btn_corners.toggled.connect(self._on_corner_mode)
+        l0.addWidget(self.btn_corners)
+        self.btn_prev_size = QPushButton("Größe vom vorigen Bild übernehmen")
+        self.btn_prev_size.setToolTip(
+            "Übernimmt Breite und Höhe des Rahmens aus dem zuletzt zugeschnittenen Bild. "
+            "Danach den Rahmen nur noch an die richtige Stelle schieben – alle Bilder "
+            "haben so exakt dieselbe Pixelgröße (wichtig für die Photogrammetrie).")
+        self.btn_prev_size.clicked.connect(self._apply_previous_size)
+        l0.addWidget(self.btn_prev_size)
+        self.chk_lock_size = QCheckBox("Größe festhalten (Rahmen nur verschieben)")
+        self.chk_lock_size.setChecked(QSettings().value("lock_crop_size", False, type=bool))
+        self.chk_lock_size.toggled.connect(self._on_lock_size)
+        l0.addWidget(self.chk_lock_size)
+        lay.addWidget(g0)
 
         g = QGroupBox("Ausschnitt (Pixel)")
         form = QFormLayout(g)
@@ -314,7 +338,8 @@ class MainWindow(QMainWindow):
         self.aspect_box.currentIndexChanged.connect(self._on_aspect)
         form.addRow("Seitenverhältnis", self.aspect_box)
         btn_full = QPushButton("Ganzes Bild")
-        btn_full.clicked.connect(lambda: self._set_crop(None))
+        btn_full.clicked.connect(lambda: self._set_crop(None) if not self.chk_lock_size.isChecked()
+                                 else None)
         form.addRow(btn_full)
         lay.addWidget(g)
 
@@ -569,9 +594,12 @@ class MainWindow(QMainWindow):
     def _select_image(self, row):
         if row < 0 or row >= len(self.entries):
             return
+        if self.entry is not None and self.entry.settings.crop:
+            self._last_crop_size = tuple(self.entry.settings.crop[2:])
         self.entry = self.entries[row]
         self.doc = None
         self._auto_cache = None
+        self._thumbs_geometry = None
         self._crop_qimage = None
         self._last_geometry = None
         self.view.clear()
@@ -633,7 +661,8 @@ class MainWindow(QMainWindow):
             self._busy[kind] = False
             if self._pending[kind]:
                 self._pending[kind] = False
-                (self._render_preview if kind == "preview" else self._render_detail)()
+                {"preview": self._render_preview, "detail": self._render_detail,
+                 "thumbs": self._render_thumbs}[kind]()
         if gen != self._gen.get(kind):
             return  # veraltet
         try:
@@ -803,7 +832,14 @@ class MainWindow(QMainWindow):
     def _render_thumbs(self):
         if not self.doc:
             return
+        if self._busy["thumbs"]:
+            self._pending["thumbs"] = True
+            return
         doc, base = self.doc, self.entry.settings
+        geometry = (base.rotation, base.crop)
+        if geometry == self._thumbs_geometry:
+            return  # schon aktuell
+        self._thumbs_geometry = geometry
         presets = self._all_presets()
 
         def job():
@@ -847,7 +883,10 @@ class MainWindow(QMainWindow):
             self._sync_controls()
         if history:
             self._t_history.start()
-        if geo_changed:
+        if geo_changed and self.tabs.currentIndex() == 1:
+            # Vorschaukacheln erst im Schritt "Verbessern" neu berechnen – beim
+            # Ziehen des Zuschneiderahmens würde sonst jede Mausbewegung eine
+            # Berechnung über das ganze Bild auslösen.
             self._t_thumbs.start()
         self._t_render.start()
 
@@ -995,10 +1034,69 @@ class MainWindow(QMainWindow):
         else:
             self.view.set_mode("edit")
             self._last_geometry = None
+            self._t_thumbs.start(300)
             self.view.clear()
             self.statusBar().showMessage("Berechne Vorschau …", 2000)
             self._render_preview()
         self._update_zoom_label()
+
+    def _on_corner_mode(self, on):
+        self.view.set_corner_mode(on)
+        if on:
+            self.statusBar().showMessage("Obere linke Ecke anklicken …")
+
+    def _on_corner_step(self, step):
+        if step == 1:
+            self.statusBar().showMessage("Jetzt die untere rechte Ecke anklicken …")
+        else:
+            self.btn_corners.setChecked(False)
+            self.statusBar().showMessage("Rahmen gesetzt – Ecken und Kanten lassen sich "
+                                         "noch fein verschieben.", 6000)
+
+    def _on_lock_size(self, on):
+        QSettings().setValue("lock_crop_size", bool(on))
+        self.view.size_locked = on
+        self.btn_corners.setEnabled(not on)
+        for sb in self.spin_crop[2:]:
+            sb.setEnabled(not on)
+        self.aspect_box.setEnabled(not on)
+        self.view.viewport().update()
+
+    def _previous_crop_size(self):
+        """Breite/Höhe aus dem zuletzt bearbeiteten anderen Bild (mit Zuschnitt)."""
+        if self._last_crop_size:
+            return self._last_crop_size
+        idx = self.entries.index(self.entry) if self.entry in self.entries else -1
+        others = self.entries[:idx][::-1] + self.entries[idx + 1:]
+        for e in others:
+            if e.settings.crop:
+                return e.settings.crop[2], e.settings.crop[3]
+        return None
+
+    def _apply_previous_size(self):
+        if not self.doc:
+            return
+        size = self._previous_crop_size()
+        if not size:
+            QMessageBox.information(self, "Keine Vorlage",
+                                    "Es wurde noch kein anderes Bild zugeschnitten.")
+            return
+        w, h = self.doc.size
+        cw, ch = min(size[0], w), min(size[1], h)
+        x, y, ow, oh = P.clamp_crop(self.entry.settings.crop, w, h)
+        # Mittelpunkt des bisherigen Rahmens beibehalten, dann in das Bild schieben
+        nx = min(max(0, x + ow // 2 - cw // 2), w - cw)
+        ny = min(max(0, y + oh // 2 - ch // 2), h - ch)
+        self._set_crop((nx, ny, cw, ch))
+        if (cw, ch) != tuple(size):
+            QMessageBox.warning(self, "Bild zu klein",
+                                f"Die Vorlage ({size[0]} × {size[1]} px) ist größer als dieses "
+                                f"Bild – der Rahmen wurde auf {cw} × {ch} px verkleinert.")
+        else:
+            self.chk_lock_size.setChecked(True)
+            self.statusBar().showMessage(
+                f"Rahmen {cw} × {ch} px übernommen – jetzt an die richtige Stelle schieben.",
+                8000)
 
     def _set_crop(self, crop):
         if not self.doc:
@@ -1140,6 +1238,7 @@ class MainWindow(QMainWindow):
         self.user_presets[name] = P.tonal_dict(self.entry.settings)
         save_user_presets(self.preset_dir, self.user_presets)
         self._fill_preset_list()
+        self._thumbs_geometry = None
         self._render_thumbs()
 
     def delete_preset(self):

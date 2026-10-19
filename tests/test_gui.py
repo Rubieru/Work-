@@ -148,3 +148,68 @@ def test_simple_mode_sliders(app, tmp_path, monkeypatch):
     win._apply_preset_item(win.preset_list.item(0))
     assert win.simple_sliders["contrast"].value() == 0
     win.close()
+
+
+def _crop_window(app, tmp_path, monkeypatch, n=2):
+    from luftbild_editor.main_window import MainWindow
+    monkeypatch.setattr("PySide6.QtCore.QStandardPaths.writableLocation",
+                        lambda *_: str(tmp_path / "cfg"))
+    files = []
+    for i in range(n):
+        src = tmp_path / f"b{i}.tif"
+        P.save_image(str(src), P.to_uint(synthetic_aerial(800 + 20 * i, 600, seed=i), 8), "tif8")
+        files.append(str(src))
+    win = MainWindow()
+    win.show()
+    win.chk_lock_size.setChecked(False)
+    win.add_files(files)
+    wait(app)
+    win.tabs.setCurrentIndex(0)
+    wait(app)
+    return win
+
+
+def test_crop_drag_does_not_start_thumbnail_storm(app, tmp_path, monkeypatch):
+    win = _crop_window(app, tmp_path, monkeypatch, 1)
+    calls = []
+    orig = win._submit
+    monkeypatch.setattr(win, "_submit", lambda kind, fn: (calls.append(kind), orig(kind, fn)))
+    for i in range(40):  # wie viele Mausbewegungen beim Ziehen
+        win._set_crop((10 + i, 10, 500, 400))
+        app.processEvents()
+    wait(app)
+    assert calls.count("thumbs") == 0
+    win.tabs.setCurrentIndex(1)
+    from PySide6.QtTest import QTest
+    QTest.qWait(600)  # Kacheln starten leicht verzögert
+    wait(app)
+    assert calls.count("thumbs") == 1
+    win.close()
+
+
+def test_corner_mode_and_previous_size(app, tmp_path, monkeypatch):
+    from PySide6.QtCore import QPointF
+    win = _crop_window(app, tmp_path, monkeypatch, 2)
+    v = win.view
+    # Zwei-Klick-Modus direkt über die Ansicht-Logik
+    win.btn_corners.setChecked(True)
+    assert v.corner_mode
+    v._corner_a = QPointF(20, 30)
+    v.crop_rect = v.crop_rect  # unverändert
+    from PySide6.QtCore import QRectF
+    v.crop_rect = QRectF(QPointF(20, 30), QPointF(520, 430)).normalized()
+    v.set_corner_mode(False)
+    v.cropChanged.emit(v.crop_tuple())
+    assert win.entry.settings.crop == (20, 30, 500, 400)
+    # nächstes Bild: Größe übernehmen, Position bleibt verschiebbar
+    win.image_list.setCurrentRow(1)
+    wait(app)
+    win.tabs.setCurrentIndex(0)
+    win._apply_previous_size()
+    x, y, w, h = win.entry.settings.crop
+    assert (w, h) == (500, 400)
+    assert win.chk_lock_size.isChecked() and v.size_locked
+    win._set_crop((5, 7, w, h))
+    assert win.entry.settings.crop == (5, 7, 500, 400)
+    win.chk_lock_size.setChecked(False)
+    win.close()
