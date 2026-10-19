@@ -5,12 +5,13 @@ DGM 1945 – Rekonstruktion der Geländeoberkante 1945 (GOK45)
 
 Automatisierte Prozesskette:
 
-  1. Excel/CSV-Tabelle mit Höhen 1945 einlesen (Kilometrierung, Name
-     Sohle/Berme/Deich, Höhe in m ü. NHN, optional Seite links/rechts).
-  2. Kilometrierung auf die Flussachse (Linien-Shape) übertragen und die
-     Höhenpunkte auf den passenden Linien (Sohle/Berme/Deich) setzen.
-  3. Punkte entlang der Linien verdichten (Bruchkanten-Wirkung).
-  4. Triangulation (Delaunay-TIN, linear) -> GOK45.tif
+  1. Excel/CSV-Tabelle mit Höhen 1945 einlesen (Kilometrierung, Seite,
+     Abstand zur Achse, Höhe in m ü. NHN – optional Name Sohle/Berme/Deich).
+  2. Kilometrierung der Flussachse (Start-km/-m aus der DBF) übernehmen und die
+     Höhenpunkte über Station + Seite + Abstand senkrecht zur Achse setzen
+     (alternativ: auf Sohle-/Berme-/Deich-Linien).
+  3. Triangulation (Delaunay-TIN, linear) -> GOK45.tif; Flächen ohne
+     Tabellenwerte werden mit dem DGM1 aufgefüllt.
   5. Differenz DGM1 - GOK45 -> Veränderung seit 1945
   6. GOK45 - 8 m -> maximale Bomben-Eindringtiefe (m ü. NHN)
      und Sondiertiefe unter heutiger GOK (DGM1 - (GOK45 - 8 m)).
@@ -54,19 +55,20 @@ class Einstellungen:
     linien: str                     # Linien-Layer (Shape/GPKG) mit Achse + Sohle/Berme/Deich
     ausgabe_ordner: str
 
-    # Linien-Layer
-    linien_typ_feld: str = "typ"    # Attributfeld mit Achse/Sohle/Berme/Deich
+    # Linien-Layer (bei Methode "abstand" genügt die Achse allein)
+    linien_typ_feld: str = "typ"    # Attributfeld mit Achse/Sohle/Berme/Deich (fehlt es: alles = Achse)
     linien_seite_feld: str = ""     # optional: Feld mit links/rechts
     achse_wert: str = "Achse"       # Wert im Typ-Feld für die Flussachse
     achse_datei: str = ""           # optional: Achse als eigener Layer
 
     # Kilometrierung
-    km_start: Optional[float] = None    # km am Anfang (1. Stützpunkt) der Achse
-    km_steigend: bool = True            # km nimmt in Digitalisierrichtung zu
+    km_start: Optional[float] = None    # km am Anfang (1. Stützpunkt) der Achse; leer = aus DBF
+    achse_km_feld: str = ""             # DBF-Feld mit Start-km/-m der Achse (leer = automatisch)
+    km_steigend: Optional[bool] = None  # km nimmt in Digitalisierrichtung zu (None = automatisch)
     km_punkte: str = ""                 # optional: Punkt-Layer mit km-Steinen (Kalibrierung)
     km_punkte_feld: str = "km"
-    km_einheit_m: float = 1000.0        # Meter je Einheit der Tabellen-Station (km -> 1000)
-    fliessrichtung_km_steigend: bool = True  # für links/rechts (in Fließrichtung)
+    km_einheit_m: float = 0.0           # Meter je Einheit der Tabellen-Station (km: 1000, m: 1, 0 = auto)
+    fliessrichtung_km_steigend: bool = True  # links/rechts gelten in Richtung steigender km
 
     # Tabelle
     excel_blatt: str = ""
@@ -74,12 +76,19 @@ class Einstellungen:
     spalte_name: str = ""
     spalte_hoehe: str = ""
     spalte_seite: str = ""
+    spalte_abstand: str = ""
+    spalte_jahr: str = ""
+    bergsenkung_spalte: str = ""    # optional: Spalte mit Bergsenkung, wird von der Höhe abgezogen
+    bergsenkung_faktor: float = 0.01  # Umrechnung der Bergsenkungsspalte in m (cm -> 0.01)
+    bezugsjahr: int = 1945          # mehrere Werte am selben Ort: Jahr am nächsten daran gewinnt
+    duplikate: str = "jahr"         # "jahr" | "mittel" | "alle"
 
     # Punktsetzung
-    methode: str = "lot"            # "lot" (Querprofil senkrecht zur Achse) oder "entlang"
+    methode: str = "auto"           # "abstand" (Station+Seite+Abstand), "lot" (Schnitt mit Linien),
+                                    # "entlang" oder "auto" (abstand, wenn Spalte ABSTAND vorhanden)
     suchweite: float = 1000.0       # halbe Länge der Profil-Lote in m
     tangenten_fenster: float = 20.0 # Glättung der Achsrichtung in m
-    verdichtung: float = 5.0        # Punktabstand für Verdichtung entlang der Linien (0 = aus)
+    verdichtung: float = 5.0        # Zwischenprofile bzw. Verdichtung entlang der Linien alle x m (0 = aus)
 
     # Raster
     dgm1: list = field(default_factory=list)   # DGM1-Kacheln (GeoTIFF, XYZ, ASC ...) oder Ordner
@@ -87,6 +96,8 @@ class Einstellungen:
     maske: str = ""                 # optional: Polygon zum Zuschneiden des TIN
     auto_maske: bool = True         # TIN auf Korridor zwischen äußersten Linien begrenzen
     masken_klasse: float = 10.0     # Stationsabstand (m) für die automatische Korridormaske
+    dgm1_auffuellen: bool = True    # Flächen ohne Tabellenwerte mit DGM1 füllen
+    auffuell_puffer: float = 20.0   # Füllbereich = Achse gepuffert um (max. Abstand + x m)
     epsg: int = 0                   # optional: CRS erzwingen (z.B. 25832)
     eindringtiefe: float = 8.0      # m
 
@@ -175,21 +186,24 @@ def typ_passt(tabellen_typ: str, linien_typ: str) -> bool:
 # Tabelle einlesen
 # --------------------------------------------------------------------------
 _KW = {
-    "km": ["km", "station", "stat", "kilometr", "fluss km", "stationierung"],
+    "km": ["km", "station", "stat", "kilometrie", "kilometr", "fluss km", "stationierung"],
     "hoehe": ["hoehe", "hohe", "nhn", "nn", "z", "kote", "hoehen"],
     "seite": ["seite", "ufer"],
-    "name": ["name", "bezeichnung", "typ", "art", "objekt", "element"],
+    "abstand": ["abstand", "offset", "entfernung", "achsabstand", "dist"],
+    "jahr": ["jahr", "planjahr", "aufnahmejahr"],
+    "name": ["name", "bezeichnung", "typ", "art", "objekt", "element", "schluessel"],
 }
+_REIHENFOLGE = ("km", "seite", "abstand", "hoehe", "jahr", "name")
 
 
-def _passt_kw(kopf: str, kws) -> bool:
+def _passt_kw(kopf: str, kws, genau: bool) -> bool:
     h = norm(kopf)
     if not h:
         return False
     for kw in kws:
-        if h == kw or h.split()[0] == kw:
+        if h == kw:
             return True
-        if len(kw) >= 4 and kw in h:
+        if not genau and (h.split()[0] == kw or (len(kw) >= 4 and kw in h)):
             return True
     return False
 
@@ -207,29 +221,37 @@ def _spalten_finden(kopf: list, vorgabe: dict) -> dict:
                     break
             else:
                 raise ValueError(f"Spalte '{name}' nicht in Tabelle gefunden. Vorhanden: {kopf}")
-    for key in ("seite", "km", "hoehe", "name"):
-        if key in res:
-            continue
-        for i, k in enumerate(kopf):
-            if i not in benutzt and _passt_kw(k, _KW[key]):
-                res[key] = i
-                benutzt.add(i)
-                break
+    # erst exakte Treffer (z.B. "HOEHE" vor "HOEHE_BS"), dann Teiltreffer
+    for genau in (True, False):
+        for key in _REIHENFOLGE:
+            if key in res:
+                continue
+            for i, k in enumerate(kopf):
+                if i not in benutzt and _passt_kw(k, _KW[key], genau):
+                    res[key] = i
+                    benutzt.add(i)
+                    break
     return res
+
+
+def _spalte_index(kopf: list, name: str):
+    for i, k in enumerate(kopf):
+        if norm(k) == norm(name):
+            return i
+    raise ValueError(f"Spalte '{name}' nicht in Tabelle gefunden. Vorhanden: {kopf}")
 
 
 def _zeilen_lesen(pfad: str, blatt: str) -> list:
     ext = os.path.splitext(pfad)[1].lower()
     if ext in (".csv", ".txt"):
-        with open(pfad, newline="", encoding="utf-8-sig") as f:
-            probe = f.read(4096)
-            f.seek(0)
-            try:
-                dialekt = csv.Sniffer().sniff(probe, delimiters=";,\t")
-            except csv.Error:
-                dialekt = csv.excel
-                dialekt.delimiter = ";"
-            return [list(r) for r in csv.reader(f, dialekt)]
+        roh = open(pfad, "rb").read()
+        try:
+            text = roh.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = roh.decode("cp1252", errors="replace")
+        erste = text.splitlines()[0] if text else ""
+        trenner = max(";,\t", key=erste.count)
+        return [list(r) for r in csv.reader(text.splitlines(), delimiter=trenner)]
     if ext in (".xlsx", ".xlsm"):
         try:
             import openpyxl  # noqa
@@ -260,11 +282,14 @@ class Messwert:
     seite: str
     hoehe: float
     zeile: int
+    abstand: Optional[float] = None
+    jahr: Optional[float] = None
 
 
 def tabelle_lesen(e: Einstellungen, log: Logger) -> list:
     zeilen = _zeilen_lesen(e.excel, e.excel_blatt)
-    vorgabe = {"km": e.spalte_km, "name": e.spalte_name, "hoehe": e.spalte_hoehe, "seite": e.spalte_seite}
+    vorgabe = {"km": e.spalte_km, "name": e.spalte_name, "hoehe": e.spalte_hoehe,
+               "seite": e.spalte_seite, "abstand": e.spalte_abstand, "jahr": e.spalte_jahr}
     kopf_idx, spalten = None, None
     for i, z in enumerate(zeilen[:40]):
         kopf = ["" if v is None else str(v) for v in z]
@@ -272,34 +297,54 @@ def tabelle_lesen(e: Einstellungen, log: Logger) -> list:
             sp = _spalten_finden(kopf, vorgabe)
         except ValueError:
             continue
-        if {"km", "hoehe", "name"} <= sp.keys():
+        if {"km", "hoehe"} <= sp.keys() and ("name" in sp or "abstand" in sp):
             kopf_idx, spalten = i, sp
             break
     if kopf_idx is None:
-        raise ValueError("Kopfzeile der Tabelle nicht erkannt (benötigt Spalten für km, Name, Höhe). "
+        raise ValueError("Kopfzeile der Tabelle nicht erkannt (benötigt Spalten für km, Höhe und "
+                         "Abstand oder Name). "
                          "Spaltennamen ggf. in den Einstellungen angeben. Erste Zeile: "
                          f"{zeilen[0] if zeilen else '-'}")
-    kopf = zeilen[kopf_idx]
+    kopf = ["" if v is None else str(v) for v in zeilen[kopf_idx]]
+    if e.bergsenkung_spalte:
+        spalten["bergsenkung"] = _spalte_index(kopf, e.bergsenkung_spalte)
     log("Tabelle: Kopfzeile %d, Spalten: %s" % (
         kopf_idx + 1, ", ".join(f"{k}='{kopf[v]}'" for k, v in spalten.items())))
+
+    # Einheit der Stationierung: km (12.345) oder m (12345)
+    einheit = e.km_einheit_m
+    if not einheit:
+        roh = [zahl(z[spalten["km"]]) for z in zeilen[kopf_idx + 1:]
+               if spalten["km"] < len(z) and not (isinstance(z[spalten["km"]], str) and "+" in z[spalten["km"]])]
+        roh = [abs(v) for v in roh if v is not None]
+        einheit = 1.0 if roh and max(roh) >= 1000 else 1000.0
+        log(f"Tabelle: Stationierung in {'Metern' if einheit == 1.0 else 'Kilometern'} erkannt")
 
     werte = []
     for nr, z in enumerate(zeilen[kopf_idx + 1:], start=kopf_idx + 2):
         def zelle(k):
             i = spalten.get(k)
             return z[i] if i is not None and i < len(z) else None
-        st = station_km(zelle("km"), e.km_einheit_m)
+        st = station_km(zelle("km"), einheit)
         h = zahl(zelle("hoehe"))
-        name = zelle("name")
-        if st is None or h is None or not name:
+        name = zelle("name") or ""
+        ab = zahl(zelle("abstand")) if "abstand" in spalten else None
+        if st is None or h is None or (not name and ab is None):
             if any(v not in (None, "") for v in z):
-                log(f"  Zeile {nr} übersprungen (unvollständig): {z}")
+                log(f"  Zeile {nr} übersprungen (unvollständig)")
             continue
+        if "bergsenkung" in spalten:
+            bs = zahl(zelle("bergsenkung"))
+            if bs is not None:
+                h -= bs * e.bergsenkung_faktor
         typ, seite_n = name_zerlegen(name)
         seite = seite_aus_text(zelle("seite")) or seite_n
-        werte.append(Messwert(st, str(zelle("km")), str(name), typ, seite, h, nr))
-    log(f"Tabelle: {len(werte)} Höhenwerte gelesen "
-        f"({', '.join(sorted({w.typ + (' ' + w.seite if w.seite else '') for w in werte}))})")
+        werte.append(Messwert(st, str(zelle("km")), str(name), typ, seite, h, nr, ab,
+                              zahl(zelle("jahr")) if "jahr" in spalten else None))
+    arten = sorted({w.typ + (' ' + w.seite if w.seite else '') for w in werte if w.typ})
+    log(f"Tabelle: {len(werte)} Höhenwerte gelesen, Station {min(w.station_m for w in werte):.0f} – "
+        f"{max(w.station_m for w in werte):.0f} m" + (f" ({', '.join(arten)})" if arten else "")
+        + (" – Bergsenkung abgezogen" if "bergsenkung" in spalten else ""))
     if not werte:
         raise ValueError("Keine gültigen Höhenwerte in der Tabelle gefunden.")
     return werte
@@ -396,43 +441,54 @@ def _linien_aus_geom(g):
             yield from _linien_aus_geom(g.GetGeometryRef(i))
 
 
-def linien_lesen(e: Einstellungen, log: Logger):
+def _attribute(f):
+    return {f.GetFieldDefnRef(i).GetName(): f.GetField(i) for i in range(f.GetFieldCount())}
+
+
+def linien_lesen(e: Einstellungen, methode: str, log: Logger):
+    """Liest Achse (+ ggf. Sohle/Berme/Deich-Linien). Rückgabe: achse, linien, srs, achs_attribute."""
     ds, lyr = _vektor_oeffnen(e.linien)
     srs = lyr.GetSpatialRef()
     defn = lyr.GetLayerDefn()
     felder = [defn.GetFieldDefn(i).GetName() for i in range(defn.GetFieldCount())]
     typ_feld = next((f for f in felder if f.lower() == e.linien_typ_feld.lower()), None)
-    if typ_feld is None:
+    if typ_feld is None and methode != "abstand" and not e.achse_datei:
         raise ValueError(f"Typ-Feld '{e.linien_typ_feld}' nicht im Linien-Layer. Felder: {felder}")
     seite_feld = next((f for f in felder if e.linien_seite_feld and f.lower() == e.linien_seite_feld.lower()), None)
 
-    linien, achs_teile = [], []
+    linien, achs_teile, attr = [], [], {}
     for f in lyr:
         g = f.GetGeometryRef()
         if g is None:
             continue
-        typ_o = f.GetField(typ_feld)
+        typ_o = f.GetField(typ_feld) if typ_feld else e.achse_wert
         typ = norm(typ_o)
         seite = seite_aus_text(f.GetField(seite_feld)) if seite_feld else ""
+        ist_achse = not e.achse_datei and typ == norm(e.achse_wert)
+        if ist_achse and not attr:
+            attr = _attribute(f)
         for pts in _linien_aus_geom(g):
             if len(pts) < 2:
                 continue
-            if not e.achse_datei and typ == norm(e.achse_wert):
+            if ist_achse:
                 achs_teile.append(pts)
             else:
                 linien.append(Polylinie(pts, typ, seite, f.GetFID(), str(typ_o)))
 
     if e.achse_datei:
         ds2, lyr2 = _vektor_oeffnen(e.achse_datei)
+        srs = srs or lyr2.GetSpatialRef()
         for f in lyr2:
             if f.GetGeometryRef() is not None:
+                attr = attr or _attribute(f)
                 achs_teile.extend(p for p in _linien_aus_geom(f.GetGeometryRef()) if len(p) >= 2)
     if not achs_teile:
         raise ValueError(f"Keine Flussachse gefunden (Typ = '{e.achse_wert}' bzw. Achs-Datei).")
     achse = Polylinie(_teile_verketten(achs_teile), "achse")
-    log(f"Linien: Achse {achse.laenge:.1f} m, {len(linien)} weitere Linien "
-        f"({', '.join(sorted({l.typ_original for l in linien}))})")
-    return achse, linien, (srs.Clone() if srs else None)
+    log(f"Linien: Achse {achse.laenge:.1f} m" + (
+        f", {len(linien)} weitere Linien ({', '.join(sorted({l.typ_original for l in linien}))})"
+        if linien else ""))
+    return achse, linien, (srs.Clone() if srs else None), attr
 
 
 def _teile_verketten(teile, tol=0.05):
@@ -463,14 +519,35 @@ def _teile_verketten(teile, tol=0.05):
 # --------------------------------------------------------------------------
 # Kilometrierung -> Achsstation
 # --------------------------------------------------------------------------
-def km_abbildung(e: Einstellungen, achse: Polylinie, log: Logger) -> Callable:
-    """Liefert Funktion: Tabellen-Station (m) -> Länge entlang der Achse (m)."""
+_START_FELDER = ["km", "km start", "start km", "kmstart", "startkm", "start m", "startm", "start",
+                 "km anfang", "anfang", "anfang km", "anfang m", "station", "stat von", "station von",
+                 "von km", "km von", "von m", "von", "stat anf", "km a", "m start", "start station"]
+_ENDE_FELDER = ["km ende", "ende km", "kmende", "endkm", "ende m", "end m", "endm", "ende", "end",
+                "bis km", "km bis", "bis m", "bis", "stat bis", "station bis", "km e", "m ende"]
+
+
+def _feld_suchen(attr: dict, kandidaten, vorgabe=""):
+    if vorgabe:
+        for k, v in attr.items():
+            if norm(k) == norm(vorgabe):
+                return k, zahl(v)
+        raise ValueError(f"Feld '{vorgabe}' nicht in den Attributen der Achse: {list(attr)}")
+    normiert = {norm(k): k for k in attr}
+    for c in kandidaten:
+        if c in normiert and zahl(attr[normiert[c]]) is not None:
+            k = normiert[c]
+            return k, zahl(attr[k])
+    return None, None
+
+
+def km_abbildung(e: Einstellungen, achse: Polylinie, attr: dict, werte, log: Logger):
+    """Liefert (Funktion Tabellen-Station [m] -> Länge entlang der Achse [m], km_steigend)."""
     if e.km_punkte:
         ds, lyr = _vektor_oeffnen(e.km_punkte)
         paare = []
         for f in lyr:
             g = f.GetGeometryRef()
-            km = station_km(f.GetField(e.km_punkte_feld), e.km_einheit_m)
+            km = station_km(f.GetField(e.km_punkte_feld), e.km_einheit_m or 1000.0)
             if g is None or km is None:
                 continue
             m, d = achse.projektion(np.array([g.GetX(), g.GetY()]))
@@ -492,17 +569,51 @@ def km_abbildung(e: Einstellungen, achse: Polylinie, log: Logger) -> Callable:
                 k = (m[-1] - m[-2]) / (s[-1] - s[-2])
                 return m[-1] + (st - s[-1]) * k
             return float(np.interp(st, s, m))
-        return f
+        return f, bool(m[-1] >= m[0])
 
-    if e.km_start is None:
-        raise ValueError("km_start (km am Anfangspunkt der Achse) oder ein km-Punkte-Layer muss "
-                         "angegeben werden.")
-    start = e.km_start * 1000.0
-    vz = 1.0 if e.km_steigend else -1.0
-    log(f"Kilometrierung: Achsanfang = km {e.km_start:.3f}, km "
-        f"{'steigend' if e.km_steigend else 'fallend'} in Digitalisierrichtung "
-        f"(Achse deckt km {e.km_start:.3f} – {(start + vz * achse.laenge)/1000:.3f})")
-    return lambda st: (st - start) * vz
+    st_min = min(w.station_m for w in werte)
+    st_max = max(w.station_m for w in werte)
+    L = achse.laenge
+    tol = max(50.0, 0.02 * L)
+    ende = None
+    if e.km_start is not None:
+        quelle = "Einstellung"
+        starts = [e.km_start * 1000.0]
+    else:
+        feld, wert = _feld_suchen(attr, _START_FELDER, e.achse_km_feld)
+        if feld is None:
+            raise ValueError("Keine Kilometrierung gefunden: km_start angeben oder Feld mit Start-km/-m "
+                             f"in der DBF der Achse (vorhandene Felder: {list(attr) or 'keine'}).")
+        quelle = f"DBF-Feld '{feld}' = {wert:g}"
+        # Feldwert kann in km oder m sein -> beide Deutungen prüfen
+        starts = [wert, wert * 1000.0] if abs(wert) < 1000 else [wert]
+        if norm(feld).endswith(" m") or (norm(feld).endswith("m") and "km" not in norm(feld)):
+            starts = [wert]
+        _, ende = _feld_suchen(attr, _ENDE_FELDER)
+        if ende is not None and ende != wert and e.km_steigend is None:
+            quelle += f", Ende = {ende:g}"
+    richtungen = [e.km_steigend] if e.km_steigend is not None else [True, False]
+    if e.km_steigend is None and ende is not None and ende != wert:
+        richtungen = [ende > wert]
+
+    def passt(start, steig):
+        lo, hi = (start, start + L) if steig else (start - L, start)
+        return lo - tol <= st_min and st_max <= hi + tol
+
+    loesungen = [(a, r) for a in starts for r in richtungen if passt(a, r)]
+    if not loesungen:
+        loesungen = [(starts[-1], richtungen[0])]
+        log(f"WARNUNG: Tabellen-Stationen {st_min:.0f} – {st_max:.0f} m liegen nicht auf der Achse "
+            f"(Start {starts[-1]:.0f} m, Länge {L:.0f} m). Kilometrierung prüfen!")
+    elif len({r for _, r in loesungen}) > 1:
+        log("WARNUNG: Richtung der Kilometrierung nicht eindeutig – 'km_steigend' angeben. "
+            "Verwendet: steigend.")
+    start, steig = loesungen[0]
+    vz = 1.0 if steig else -1.0
+    log(f"Kilometrierung: Achsanfang = {start:.1f} m ({quelle}), km "
+        f"{'steigend' if steig else 'fallend'} in Digitalisierrichtung "
+        f"(Achse deckt {start:.0f} – {start + vz * L:.0f} m)")
+    return (lambda st: (st - start) * vz), steig
 
 
 # --------------------------------------------------------------------------
@@ -519,6 +630,8 @@ class Punkt:
     linie: int      # Index in Linienliste
     quelle: str     # "tabelle" / "verdichtet"
     m_linie: float = 0.0
+    jahr: Optional[float] = None
+    versatz: Optional[float] = None   # Abstand zur Achse, + links der Digitalisierrichtung
 
 
 def _schnittpunkte(g_linie, g_lot):
@@ -538,11 +651,118 @@ def _schnittpunkte(g_linie, g_lot):
     return pts
 
 
-def punkte_setzen(e: Einstellungen, werte, achse: Polylinie, linien, km2m, log: Logger):
+def punkte_abstand(e: Einstellungen, werte, achse: Polylinie, km2m, km_steigend, log: Logger):
+    """Punkt = Achspunkt bei Station + Seite * Abstand senkrecht zur Achse."""
+    punkte, fehlend, tol = [], 0, 1.0
+    fluss_vz = 1.0 if (km_steigend == e.fliessrichtung_km_steigend) else -1.0
+    for w in werte:
+        m = km2m(w.station_m)
+        if m < -tol or m > achse.laenge + tol:
+            log(f"  Zeile {w.zeile}: Station {w.station_m:.1f} m liegt außerhalb der Achse")
+            fehlend += 1
+            continue
+        ab = w.abstand or 0.0
+        if ab != 0 and not w.seite:
+            log(f"  Zeile {w.zeile}: Abstand {ab:g} m ohne Seite (links/rechts) – übersprungen")
+            fehlend += 1
+            continue
+        p = achse.punkt(m)
+        t = achse.richtung(m, e.tangenten_fenster)
+        n_links = np.array([-t[1], t[0]]) * fluss_vz      # links in Bezugsrichtung
+        vers = ab * (1.0 if w.seite == "links" else -1.0)
+        q = p + n_links * vers
+        punkte.append(Punkt(q[0], q[1], w.hoehe, w.station_m, w.name, w.seite, -1, "tabelle",
+                            m_linie=m, jahr=w.jahr, versatz=vers * fluss_vz))
+    log(f"Punkte: {len(punkte)} Punkte über Station/Seite/Abstand gesetzt"
+        + (f", {fehlend} Werte ohne Lage (siehe oben)" if fehlend else ""))
+    return punkte
+
+
+def profile_interpolieren(punkte, achse: Polylinie, abstand: float, fenster: float, log: Logger):
+    """Zwischenprofile alle `abstand` m entlang der Achse.
+
+    Für jeden Achsabstand wird die Höhe linear zwischen dem nächsten Profil davor und
+    dem nächsten Profil danach interpoliert, die diesen Abstand abdecken (Lücken in
+    einzelnen Profilen werden so vom nächsten vollständigen Profil überbrückt). Die
+    Punkte werden senkrecht zur Achse abgesetzt – das TIN folgt damit der Flusskrümmung,
+    statt weit auseinanderliegende Profile geradlinig zu verbinden.
+    """
+    if abstand <= 0:
+        return []
+    profile = {}
+    for p in punkte:
+        if p.versatz is not None:
+            profile.setdefault(round(p.m_linie, 2), []).append(p)
+    stationen = sorted(profile)
+    kurven = []
+    for st in stationen:
+        werte = {}
+        for p in profile[st]:
+            werte.setdefault(round(p.versatz, 3), []).append(p.hoehe)
+        d = np.array(sorted(werte))
+        kurven.append((d, np.array([np.mean(werte[k]) for k in sorted(werte)])))
+    if len(stationen) < 2:
+        return []
+    alle_d = np.unique(np.concatenate([k[0] for k in kurven]))
+    # deckt[i, j]: Profil i enthält Abstand alle_d[j] (innerhalb seiner Punkte, auch einzelne Punkte)
+    deckt = np.array([(alle_d >= d[0] - 1e-6) & (alle_d <= d[-1] + 1e-6) for d, _ in kurven])
+    hoehen = np.array([np.interp(alle_d, d, h) for d, h in kurven])
+    st_arr = np.array(stationen)
+
+    neu = []
+    for s in np.arange(st_arr[0] + abstand, st_arr[-1] - abstand / 2, abstand):
+        if np.min(np.abs(st_arr - s)) < abstand / 2:
+            continue                                   # zu nah an einem echten Profil
+        vor = np.where(st_arr < s)[0][::-1]           # Profile davor, nächstes zuerst
+        nach = np.where(st_arr > s)[0]
+        pa = achse.punkt(s)
+        t = achse.richtung(s, fenster)
+        n = np.array([-t[1], t[0]])
+        for j, d in enumerate(alle_d):
+            iv = next((i for i in vor if deckt[i, j]), None)
+            ina = next((i for i in nach if deckt[i, j]), None)
+            if iv is None or ina is None:
+                continue
+            w = (s - st_arr[iv]) / (st_arr[ina] - st_arr[iv])
+            z = (1 - w) * hoehen[iv, j] + w * hoehen[ina, j]
+            q = pa + n * d
+            neu.append(Punkt(q[0], q[1], float(z), float("nan"), "", "", -1, "interpoliert",
+                             m_linie=float(s), versatz=float(d)))
+    log(f"Profilinterpolation: {len(neu)} Zusatzpunkte in Zwischenprofilen alle {abstand:g} m")
+    return neu
+
+
+def doppelte_bereinigen(punkte, modus: str, bezugsjahr: int, log: Logger):
+    """Mehrere Werte am selben Ort: Jahr am nächsten am Bezugsjahr (bei Gleichstand Mittel)."""
+    if modus == "alle":
+        return punkte
+    gruppen = {}
+    for p in punkte:
+        gruppen.setdefault((round(p.x, 2), round(p.y, 2)), []).append(p)
+    neu, n_mehr = [], 0
+    for g in gruppen.values():
+        if len(g) == 1:
+            neu.append(g[0])
+            continue
+        n_mehr += 1
+        wahl = g
+        if modus == "jahr" and all(p.jahr is not None for p in g):
+            dmin = min(abs(p.jahr - bezugsjahr) for p in g)
+            wahl = [p for p in g if abs(p.jahr - bezugsjahr) == dmin]
+        p0 = wahl[0]
+        p0.hoehe = float(np.mean([p.hoehe for p in wahl]))
+        neu.append(p0)
+    if n_mehr:
+        log(f"Punkte: {n_mehr} Orte mit mehreren Werten – "
+            + (f"Wert mit Jahr am nächsten an {bezugsjahr} verwendet" if modus == "jahr" else "gemittelt"))
+    return neu
+
+
+def punkte_setzen(e: Einstellungen, werte, achse: Polylinie, linien, km2m, km_steigend, log: Logger):
     punkte = []
     fehlend = 0
     tol = 1.0
-    fluss_vz = 1.0 if (e.km_steigend == e.fliessrichtung_km_steigend) else -1.0
+    fluss_vz = 1.0 if (km_steigend == e.fliessrichtung_km_steigend) else -1.0
     for w in werte:
         kandidaten = [i for i, l in enumerate(linien) if typ_passt(w.typ, l.typ)]
         if w.seite:
@@ -562,7 +782,8 @@ def punkte_setzen(e: Einstellungen, werte, achse: Polylinie, linien, km2m, log: 
                 l = linien[i]
                 if -tol <= m <= l.laenge + tol:
                     x, y = l.punkt(m)
-                    punkte.append(Punkt(x, y, w.hoehe, w.station_m, w.name, w.seite, i, "tabelle"))
+                    punkte.append(Punkt(x, y, w.hoehe, w.station_m, w.name, w.seite, i, "tabelle",
+                                        jahr=w.jahr))
                     gesetzt += 1
         else:
             p = achse.punkt(m)
@@ -576,13 +797,21 @@ def punkte_setzen(e: Einstellungen, werte, achse: Polylinie, linien, km2m, log: 
             for i in kandidaten:
                 l = linien[i]
                 sp = _schnittpunkte(l.geom, lot)
+                if not sp:
+                    # Lot verfehlt das Linienende knapp (Linie beginnt/endet am Profil)
+                    for ende in (l.c[0], l.c[-1]):
+                        pe = ogr.Geometry(ogr.wkbPoint)
+                        pe.AddPoint_2D(float(ende[0]), float(ende[1]))
+                        if pe.Distance(lot) < 5.0:
+                            sp.append((float(ende[0]), float(ende[1])))
                 if w.seite and not l.seite:
                     sig = 1.0 if w.seite == "links" else -1.0
                     sp = [q for q in sp if np.dot(np.array(q) - p, n_fluss) * sig > 0]
                 if not sp:
                     continue
                 q = min(sp, key=lambda q: math.hypot(q[0] - p[0], q[1] - p[1]))
-                punkte.append(Punkt(q[0], q[1], w.hoehe, w.station_m, w.name, w.seite, i, "tabelle"))
+                punkte.append(Punkt(q[0], q[1], w.hoehe, w.station_m, w.name, w.seite, i, "tabelle",
+                                    jahr=w.jahr))
                 gesetzt += 1
         if not gesetzt:
             log(f"  Zeile {w.zeile}: '{w.name}' km {w.station_m/1000:.3f} – keine passende Linie "
@@ -624,33 +853,38 @@ def verdichten(punkte, linien, abstand: float, log: Logger):
 
 
 def korridor_polygon(punkte, achse: Polylinie, klasse: float, puffer: float):
-    """Polygon zwischen den jeweils äußersten Punkten links und rechts der Achse.
+    """Fläche, die von den Punkten benachbarter Profile aufgespannt wird.
 
-    Verhindert, dass die Delaunay-Triangulation (konvexe Hülle) Flächen außerhalb
-    des Deichkorridors – z.B. die Innenseite von Flussbögen – überbrückt.
+    Vereinigung der konvexen Hüllen je dreier aufeinanderfolgender Profile.
+    Verhindert, dass die Delaunay-Triangulation (konvexe Hülle über alles) Flächen
+    außerhalb des Korridors – z.B. die Innenseite von Flussbögen – überbrückt.
     """
     xy = np.array([[p.x, p.y] for p in punkte])
-    m, d = achse.stationen_versatz(xy)
-    klasse = max(klasse, 1e-3)
-    k = np.floor(m / klasse).astype(int)
-    links, rechts = [], []
-    for kk in np.unique(k):
-        sel = np.where(k == kk)[0]
-        il = sel[np.argmax(d[sel])]
-        ir = sel[np.argmin(d[sel])]
-        links.append((m[il], xy[il]))
-        rechts.append((m[ir], xy[ir]))
-    links.sort(key=lambda t: t[0])
-    rechts.sort(key=lambda t: t[0])
-    ring = ogr.Geometry(ogr.wkbLinearRing)
-    for _, q in links + rechts[::-1]:
-        ring.AddPoint_2D(float(q[0]), float(q[1]))
-    ring.AddPoint_2D(float(links[0][1][0]), float(links[0][1][1]))
-    poly = ogr.Geometry(ogr.wkbPolygon)
-    poly.AddGeometry(ring)
-    if not poly.IsValid():
-        poly = poly.MakeValid() if hasattr(poly, "MakeValid") else poly.Buffer(0)
-    return poly.Buffer(puffer)
+    m, _ = achse.stationen_versatz(xy)
+    # Gruppen: Tabellenpunkte nach ihrer Profilstation, Zusatzpunkte nach Stationsabschnitt
+    schluessel = [("p", round(p.km, 2)) if not math.isnan(p.km) else ("v", int(mm // max(klasse, 1e-3)))
+                  for p, mm in zip(punkte, m)]
+    gruppen = {}
+    for i, s in enumerate(schluessel):
+        gruppen.setdefault(s, []).append(i)
+    gruppen = sorted(gruppen.values(), key=lambda idx: float(np.mean(m[idx])))
+    gruppen = [xy[idx] for idx in gruppen]
+    while len(gruppen) < 3:
+        gruppen = gruppen + gruppen[-1:]
+
+    def huelle(pts):
+        mp = ogr.Geometry(ogr.wkbMultiPoint)
+        for x, y in pts:
+            pt = ogr.Geometry(ogr.wkbPoint)
+            pt.AddPoint_2D(float(x), float(y))
+            mp.AddGeometry(pt)
+        return mp.ConvexHull().Buffer(puffer)
+
+    flaeche = None
+    for i in range(len(gruppen) - 2):
+        h = huelle(np.vstack(gruppen[i:i + 3]))
+        flaeche = h if flaeche is None else flaeche.Union(h)
+    return flaeche
 
 
 def punkte_schreiben(pfad, punkte, srs):
@@ -659,7 +893,7 @@ def punkte_schreiben(pfad, punkte, srs):
     ds = ogr.GetDriverByName("GPKG").CreateDataSource(pfad)
     lyr = ds.CreateLayer("punkte_1945", srs, ogr.wkbPoint25D)
     for name, typ in (("km", ogr.OFTReal), ("name", ogr.OFTString), ("seite", ogr.OFTString),
-                      ("hoehe", ogr.OFTReal), ("quelle", ogr.OFTString)):
+                      ("hoehe", ogr.OFTReal), ("jahr", ogr.OFTInteger), ("quelle", ogr.OFTString)):
         lyr.CreateField(ogr.FieldDefn(name, typ))
     lyr.StartTransaction()
     for p in punkte:
@@ -670,6 +904,8 @@ def punkte_schreiben(pfad, punkte, srs):
         f.SetField("seite", p.seite)
         f.SetField("hoehe", float(p.hoehe))
         f.SetField("quelle", p.quelle)
+        if p.jahr is not None:
+            f.SetField("jahr", int(p.jahr))
         g = ogr.Geometry(ogr.wkbPoint25D)
         g.AddPoint(float(p.x), float(p.y), float(p.hoehe))
         f.SetGeometry(g)
@@ -709,15 +945,20 @@ def _dgm1_quellen(liste):
     return dateien
 
 
-def raster_schreiben(pfad, arr, gt, srs_wkt, beschreibung=""):
+def raster_schreiben(pfad, arr, gt, srs_wkt, beschreibung="", byte=False):
     drv = gdal.GetDriverByName("GTiff")
-    ds = drv.Create(pfad, arr.shape[1], arr.shape[0], 1, gdal.GDT_Float32,
-                    ["COMPRESS=DEFLATE", "PREDICTOR=3", "TILED=YES", "BIGTIFF=IF_SAFER"])
+    ds = drv.Create(pfad, arr.shape[1], arr.shape[0], 1, gdal.GDT_Byte if byte else gdal.GDT_Float32,
+                    ["COMPRESS=DEFLATE", "TILED=YES", "BIGTIFF=IF_SAFER"]
+                    + ([] if byte else ["PREDICTOR=3"]))
     ds.SetGeoTransform(gt)
     ds.SetProjection(srs_wkt)
     b = ds.GetRasterBand(1)
-    b.SetNoDataValue(NODATA)
-    b.WriteArray(np.where(np.isfinite(arr), arr, NODATA).astype(np.float32))
+    if byte:
+        b.SetNoDataValue(0)
+        b.WriteArray(arr.astype(np.uint8))
+    else:
+        b.SetNoDataValue(NODATA)
+        b.WriteArray(np.where(np.isfinite(arr), arr, NODATA).astype(np.float32))
     if beschreibung:
         b.SetDescription(beschreibung)
     b.ComputeStatistics(False)
@@ -729,6 +970,22 @@ def _stat(arr):
     if v.size == 0:
         return "keine Werte"
     return f"min {v.min():.2f}  max {v.max():.2f}  mittel {v.mean():.2f}"
+
+
+def _maske_rastern(geom_oder_pfad, breite, hoehe, gt, srs, srs_wkt):
+    mem = gdal.GetDriverByName("MEM").Create("", breite, hoehe, 1, gdal.GDT_Byte)
+    mem.SetGeoTransform(gt)
+    mem.SetProjection(srs_wkt)
+    if isinstance(geom_oder_pfad, str):
+        mds, mlyr = _vektor_oeffnen(geom_oder_pfad)
+    else:
+        mds = gdal.GetDriverByName("Memory").Create("", 0, 0, 0, gdal.GDT_Unknown)
+        mlyr = mds.CreateLayer("m", srs, ogr.wkbPolygon)
+        f = ogr.Feature(mlyr.GetLayerDefn())
+        f.SetGeometry(geom_oder_pfad)
+        mlyr.CreateFeature(f)
+    gdal.RasterizeLayer(mem, [1], mlyr, burn_values=[1])
+    return mem.GetRasterBand(1).ReadAsArray() == 1
 
 
 def ausfuehren(e: Einstellungen, log: Logger = print, fortschritt: Callable[[float], None] = None) -> dict:
@@ -743,47 +1000,83 @@ def ausfuehren(e: Einstellungen, log: Logger = print, fortschritt: Callable[[flo
 
     lg("=== DGM 1945 Rekonstruktion ===")
     werte = tabelle_lesen(e, lg)
+    methode = e.methode
+    if methode == "auto":
+        methode = "abstand" if any(w.abstand is not None for w in werte) else "lot"
+    lg(f"Methode: {methode}")
     fs(5)
-    achse, linien, srs = linien_lesen(e, lg)
+    achse, linien, srs, attr = linien_lesen(e, methode, lg)
+
+    dgm_dateien = _dgm1_quellen(e.dgm1)
+    vrt_pfad = os.path.join(e.ausgabe_ordner, "DGM1_mosaik.vrt")
+    dgm_srs_wkt = ""
+    if dgm_dateien:
+        vrt = gdal.BuildVRT(vrt_pfad, dgm_dateien)
+        gt0 = vrt.GetGeoTransform()
+        px, py, ox, oy = gt0[1], abs(gt0[5]), gt0[0], gt0[3]
+        dgm_srs_wkt = vrt.GetProjection()
+        vrt = None
+        lg(f"DGM1: {len(dgm_dateien)} Datei(en), Pixel {px:g} m")
+    else:
+        px = py = float(e.pixelgroesse)
+        ox = oy = 0.0
+
     if e.epsg:
         srs = osr.SpatialReference()
         srs.ImportFromEPSG(int(e.epsg))
+    elif srs is None and dgm_srs_wkt:
+        srs = osr.SpatialReference(wkt=dgm_srs_wkt)
+        lg(f"Achse ohne Koordinatensystem (.prj fehlt) – übernommen vom DGM1: {srs.GetName()}")
     if srs is None:
         raise ValueError("Linien-Layer hat kein Koordinatensystem – bitte EPSG angeben.")
     srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
     srs_wkt = srs.ExportToWkt()
-    km2m = km_abbildung(e, achse, lg)
+    km2m, km_steigend = km_abbildung(e, achse, attr, werte, lg)
     fs(10)
 
-    punkte = punkte_setzen(e, werte, achse, linien, km2m, lg)
+    if methode == "abstand":
+        punkte = punkte_abstand(e, werte, achse, km2m, km_steigend, lg)
+    else:
+        punkte = punkte_setzen(e, werte, achse, linien, km2m, km_steigend, lg)
+    punkte = doppelte_bereinigen(punkte, e.duplikate, e.bezugsjahr, lg)
     if len(punkte) < 3:
         raise ValueError("Zu wenige Punkte für eine Triangulation (< 3).")
-    punkte_alle = punkte + verdichten(punkte, linien, e.verdichtung, lg)
+    if methode == "abstand":
+        punkte_alle = punkte + profile_interpolieren(punkte, achse, e.verdichtung, e.tangenten_fenster, lg)
+    else:
+        punkte_alle = punkte + (verdichten(punkte, linien, e.verdichtung, lg) if linien else [])
     pfad_pkt = os.path.join(e.ausgabe_ordner, "Punkte_1945.gpkg")
     punkte_schreiben(pfad_pkt, punkte_alle, srs)
     lg(f"-> {pfad_pkt}")
     fs(25)
 
+    # ---- Füllbereich für DGM1 (Flächen ohne Tabellenwerte) ----
+    fuell = None
+    if dgm_dateien and e.dgm1_auffuellen:
+        if e.maske:
+            fuell = e.maske
+        else:
+            _, d = achse.stationen_versatz([[p.x, p.y] for p in punkte_alle])
+            breite_m = float(np.max(np.abs(d))) + e.auffuell_puffer
+            fuell = achse.geom.Buffer(breite_m)
+            _polygon_schreiben(os.path.join(e.ausgabe_ordner, "Auffuellbereich_DGM1.gpkg"), fuell, srs)
+            lg(f"DGM1-Auffüllung: Achse ± {breite_m:.1f} m -> Auffuellbereich_DGM1.gpkg")
+
     # ---- Rastergitter festlegen (am DGM1 ausgerichtet) ----
     xs = np.array([p.x for p in punkte_alle])
     ys = np.array([p.y for p in punkte_alle])
-    dgm_dateien = _dgm1_quellen(e.dgm1)
-    dgm_vrt = None
-    if dgm_dateien:
-        vrt_pfad = os.path.join(e.ausgabe_ordner, "DGM1_mosaik.vrt")
-        dgm_vrt = gdal.BuildVRT(vrt_pfad, dgm_dateien)
-        gt0 = dgm_vrt.GetGeoTransform()
-        px, py = gt0[1], abs(gt0[5])
-        ox, oy = gt0[0], gt0[3]
-        dgm_vrt = None
-        lg(f"DGM1: {len(dgm_dateien)} Datei(en), Pixel {px:g} m")
-    else:
-        px = py = float(e.pixelgroesse)
-        ox = oy = 0.0
-    xmin = ox + math.floor((xs.min() - ox) / px) * px
-    xmax = ox + math.ceil((xs.max() - ox) / px) * px
-    ymax = oy - math.floor((oy - ys.max()) / py) * py
-    ymin = oy - math.ceil((oy - ys.min()) / py) * py
+    x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
+    if fuell is not None:
+        if isinstance(fuell, str):
+            _ds, _l = _vektor_oeffnen(fuell)
+            fx0, fx1, fy0, fy1 = _l.GetExtent()
+        else:
+            fx0, fx1, fy0, fy1 = fuell.GetEnvelope()
+        x0, x1, y0, y1 = min(x0, fx0), max(x1, fx1), min(y0, fy0), max(y1, fy1)
+    xmin = ox + math.floor((x0 - ox) / px) * px
+    xmax = ox + math.ceil((x1 - ox) / px) * px
+    ymax = oy - math.floor((oy - y1) / py) * py
+    ymin = oy - math.ceil((oy - y0) / py) * py
     breite = int(round((xmax - xmin) / px))
     hoehe = int(round((ymax - ymin) / py))
     gt = (xmin, px, 0.0, ymax, 0.0, -py)
@@ -801,27 +1094,43 @@ def ausfuehren(e: Einstellungen, log: Logger = print, fortschritt: Callable[[flo
     gdal.GetDriverByName("GTiff").Delete(tmp_tin)
     gok[gok == NODATA] = np.nan
 
-    if e.maske or e.auto_maske:
-        mem = gdal.GetDriverByName("MEM").Create("", breite, hoehe, 1, gdal.GDT_Byte)
-        mem.SetGeoTransform(gt)
-        mem.SetProjection(srs_wkt)
-        if e.maske:
-            mds, mlyr = _vektor_oeffnen(e.maske)
-            lg("Maske: vorgegebenes Polygon")
-        else:
-            poly = korridor_polygon(punkte_alle, achse, e.masken_klasse, 0.5 * px)
-            mds = gdal.GetDriverByName("Memory").Create("", 0, 0, 0, gdal.GDT_Unknown)
-            mlyr = mds.CreateLayer("korridor", srs, ogr.wkbPolygon)
-            f = ogr.Feature(mlyr.GetLayerDefn())
-            f.SetGeometry(poly)
-            mlyr.CreateFeature(f)
-            _polygon_schreiben(os.path.join(e.ausgabe_ordner, "Korridor_Maske.gpkg"), poly, srs)
-            lg("Maske: automatischer Korridor zwischen äußersten Linien -> Korridor_Maske.gpkg")
-        gdal.RasterizeLayer(mem, [1], mlyr, burn_values=[1])
-        gok[mem.GetRasterBand(1).ReadAsArray() == 0] = np.nan
-    fs(60)
+    if e.maske:
+        gok[~_maske_rastern(e.maske, breite, hoehe, gt, srs, srs_wkt)] = np.nan
+        lg("TIN auf vorgegebenes Polygon begrenzt")
+    if e.auto_maske:
+        poly = korridor_polygon(punkte_alle, achse, e.masken_klasse, 0.5 * px)
+        gok[~_maske_rastern(poly, breite, hoehe, gt, srs, srs_wkt)] = np.nan
+        _polygon_schreiben(os.path.join(e.ausgabe_ordner, "Korridor_Maske.gpkg"), poly, srs)
+        lg("TIN auf Korridor zwischen äußersten Punkten begrenzt -> Korridor_Maske.gpkg")
+    fs(55)
+
+    # ---- DGM1 laden ----
+    dgm = None
+    if dgm_dateien:
+        src = gdal.Open(vrt_pfad)
+        dgm_ds = gdal.Warp("", src, format="MEM", outputBounds=(xmin, ymin, xmax, ymax),
+                           xRes=px, yRes=py, srcSRS=dgm_srs_wkt or srs_wkt, dstSRS=srs_wkt,
+                           resampleAlg="bilinear", dstNodata=NODATA, outputType=gdal.GDT_Float32)
+        src = None
+        dgm = dgm_ds.GetRasterBand(1).ReadAsArray().astype(np.float64)
+        dgm[dgm == NODATA] = np.nan
+        dgm_ds = None
+    fs(65)
 
     erg = {"punkte": pfad_pkt}
+    quelle = np.where(np.isfinite(gok), 1, 0).astype(np.uint8)
+    if fuell is not None:
+        im_fuell = _maske_rastern(fuell, breite, hoehe, gt, srs, srs_wkt)
+        nutzen = im_fuell & ~np.isfinite(gok) & np.isfinite(dgm)
+        gok[nutzen] = dgm[nutzen]
+        quelle[nutzen] = 2
+        fl = px * py
+        lg(f"GOK45: {np.sum(quelle == 1) * fl:,.0f} m² aus Tabellenwerten, "
+           f"{np.sum(quelle == 2) * fl:,.0f} m² aus DGM1 übernommen")
+        p_q = os.path.join(e.ausgabe_ordner, "GOK45_Quelle.tif")
+        raster_schreiben(p_q, quelle, gt, srs_wkt, "1 = TIN aus Tabelle 1945, 2 = DGM1 übernommen", byte=True)
+        erg["quelle"] = p_q
+
     p_gok = os.path.join(e.ausgabe_ordner, "GOK45.tif")
     raster_schreiben(p_gok, gok, gt, srs_wkt, "GOK 1945 [m ue. NHN]")
     erg["gok45"] = p_gok
@@ -833,20 +1142,9 @@ def ausfuehren(e: Einstellungen, log: Logger = print, fortschritt: Callable[[flo
                      f"max. Bomben-Eindringtiefe (GOK45 - {e.eindringtiefe:g} m) [m ue. NHN]")
     erg["eindringtiefe"] = p_bombe
     lg(f"-> {p_bombe}   ({_stat(bombe)})")
-    fs(70)
+    fs(75)
 
-    if dgm_dateien:
-        src = gdal.Open(os.path.join(e.ausgabe_ordner, "DGM1_mosaik.vrt"))
-        src_srs = src.GetProjection() or srs_wkt
-        dgm_ds = gdal.Warp("", src, format="MEM", outputBounds=(xmin, ymin, xmax, ymax),
-                           xRes=px, yRes=py, srcSRS=src_srs, dstSRS=srs_wkt,
-                           resampleAlg="bilinear", dstNodata=NODATA, outputType=gdal.GDT_Float32)
-        src = None
-        dgm = dgm_ds.GetRasterBand(1).ReadAsArray().astype(np.float64)
-        dgm[dgm == NODATA] = np.nan
-        dgm_ds = None
-        fs(85)
-
+    if dgm is not None:
         diff = dgm - gok
         p_diff = os.path.join(e.ausgabe_ordner, "Differenz_DGM1_minus_GOK45.tif")
         raster_schreiben(p_diff, diff, gt, srs_wkt,
@@ -904,7 +1202,7 @@ def einstellungen_aus_ini(pfad: str) -> Einstellungen:
         elif k == "dgm1":
             kw[k] = [pfad_abs(x.strip()) for x in re.split(r"[;\n]", v) if x.strip()]
         elif "bool" in str(typ):
-            kw[k] = _bool(v)
+            kw[k] = None if v.strip().lower() == "auto" else _bool(v)
         elif "float" in str(typ):
             kw[k] = float(v.replace(",", "."))
         elif "int" in str(typ):
