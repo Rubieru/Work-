@@ -13,47 +13,49 @@ from .processing import TONAL_FIELDS
 #   Dächern/Wegen nicht ausfressen.
 # - Kontrastausgleich (CLAHE, wie das für Weltkriegs-Luftbilder entwickelte
 #   "Multidodging") holt Details aus flauen Bereichen.
-# - Unscharf maskieren mit Radius ~1 px und Stärke ~80 % als Grundwert; die
+# - Unscharf maskieren mit Radius ~1 px und Stärke ~70 % als Grundwert; die
 #   Schwelle verhindert, dass Filmkorn mitgeschärft wird.
+_SHARP = {"sharpen_amount": 0.7, "sharpen_radius": 1.0, "sharpen_threshold": 0.01}
+
 BUILTIN_PRESETS: dict[str, dict] = {
     "Original": {},
     "Standard Luftbild": {
-        "stretch": True, "clip_black": 0.3, "clip_white": 0.3, "equalize": 0.35,
-        "sharpen_amount": 0.8, "sharpen_radius": 1.0, "sharpen_threshold": 0.008,
+        "stretch": True, "clip_black": 0.3, "clip_white": 0.3, "stretch_buffer": 0.03,
+        "equalize": 0.25, **_SHARP,
     },
     "Flau / kontrastarm": {
-        "stretch": True, "clip_black": 1.0, "clip_white": 0.5, "equalize": 0.8,
-        "sharpen_amount": 0.8, "sharpen_radius": 1.2, "sharpen_threshold": 0.01,
+        "stretch": True, "clip_black": 0.8, "clip_white": 0.5, "equalize": 0.5,
+        "sharpen_amount": 0.7, "sharpen_radius": 1.2, "sharpen_threshold": 0.01,
     },
     "Ungleich belichtet": {
-        "flatten": 0.8, "stretch": True, "clip_black": 0.5, "clip_white": 0.5,
-        "equalize": 0.5, "sharpen_amount": 0.7, "sharpen_radius": 1.0,
-        "sharpen_threshold": 0.008,
-    },
-    "Details / Auswertung": {
-        "stretch": True, "clip_black": 0.5, "clip_white": 0.5, "equalize": 0.6,
-        "clarity": 0.25, "sharpen_amount": 1.4, "sharpen_radius": 0.8,
+        "flatten": 0.7, "stretch": True, "clip_black": 0.4, "clip_white": 0.4,
+        "equalize": 0.3, "sharpen_amount": 0.6, "sharpen_radius": 1.0,
         "sharpen_threshold": 0.01,
     },
+    "Details / Auswertung": {
+        "stretch": True, "clip_black": 0.4, "clip_white": 0.4, "equalize": 0.4,
+        "clarity": 0.15, "sharpen_amount": 1.1, "sharpen_radius": 0.9,
+        "sharpen_threshold": 0.012,
+    },
     "Grobkörnig": {
-        "dust": 0.3, "denoise": 0.6, "stretch": True, "clip_black": 0.5,
-        "clip_white": 0.5, "equalize": 0.3, "sharpen_amount": 0.6,
-        "sharpen_radius": 1.6, "sharpen_threshold": 0.02,
+        "dust": 0.3, "denoise": 0.5, "stretch": True, "clip_black": 0.4,
+        "clip_white": 0.4, "equalize": 0.2, "sharpen_amount": 0.5,
+        "sharpen_radius": 1.5, "sharpen_threshold": 0.025,
     },
     "Staub & Kratzer": {
-        "dust": 0.75, "denoise": 0.2, "stretch": True, "clip_black": 0.3,
-        "clip_white": 0.3, "equalize": 0.3, "sharpen_amount": 0.6,
+        "dust": 0.7, "denoise": 0.15, "stretch": True, "clip_black": 0.3,
+        "clip_white": 0.3, "equalize": 0.2, "sharpen_amount": 0.5,
         "sharpen_radius": 1.0, "sharpen_threshold": 0.015,
     },
     "Zu dunkel": {
-        "stretch": True, "clip_black": 0.2, "clip_white": 1.0, "midtones": 0.35,
-        "equalize": 0.4, "sharpen_amount": 0.8, "sharpen_radius": 1.0,
-        "sharpen_threshold": 0.008,
+        "stretch": True, "clip_black": 0.2, "clip_white": 0.8, "midtones": 0.3,
+        "equalize": 0.3, "sharpen_amount": 0.6, "sharpen_radius": 1.0,
+        "sharpen_threshold": 0.01,
     },
     "Zu hell": {
-        "stretch": True, "clip_black": 1.0, "clip_white": 0.2, "midtones": -0.3,
-        "equalize": 0.4, "sharpen_amount": 0.8, "sharpen_radius": 1.0,
-        "sharpen_threshold": 0.008,
+        "stretch": True, "clip_black": 0.8, "clip_white": 0.2, "midtones": -0.25,
+        "equalize": 0.3, "sharpen_amount": 0.6, "sharpen_radius": 1.0,
+        "sharpen_threshold": 0.01,
     },
     "GIS / DGM sicher": {
         # entspricht dem Gemini-Skript: Statistik aus der Bildmitte, 0,5/99,5 %,
@@ -63,8 +65,7 @@ BUILTIN_PRESETS: dict[str, dict] = {
     },
     "Negativ": {
         "invert": True, "stretch": True, "clip_black": 0.3, "clip_white": 0.3,
-        "equalize": 0.35, "sharpen_amount": 0.8, "sharpen_radius": 1.0,
-        "sharpen_threshold": 0.008,
+        "stretch_buffer": 0.03, "equalize": 0.25, **_SHARP,
     },
 }
 

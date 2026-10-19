@@ -70,7 +70,7 @@ def test_full_workflow(app, tmp_path, monkeypatch):
     # Rückgängig stellt die Voreinstellung wieder her
     win._commit_history()
     win.undo()
-    assert win.entry.settings.sharpen_amount == pytest.approx(1.4)
+    assert win.entry.settings.sharpen_amount == pytest.approx(1.1)
 
     # Zoom auf 100 % erzeugt Detailansicht in voller Auflösung
     win.view.actual_size()
@@ -119,3 +119,30 @@ def test_batch(tmp_path):
     assert P.load_image(written[0]).data.shape == (300, 400)  # ohne Zuschnitt
     written, _ = run_batch(BatchJob(files[:1], str(out), "png", "_z", True), s)
     assert P.load_image(written[0]).data.shape == (150, 200)  # mit Zuschnitt
+
+
+def test_simple_mode_sliders(app, tmp_path, monkeypatch):
+    from luftbild_editor.main_window import MainWindow
+    monkeypatch.setattr("PySide6.QtCore.QStandardPaths.writableLocation",
+                        lambda *_: str(tmp_path / "cfg"))
+    src = tmp_path / "a.tif"
+    P.save_image(str(src), P.to_uint(synthetic_aerial(600, 450), 8), "tif8")
+    win = MainWindow()
+    win.show()
+    win.add_files([str(src)])
+    wait(app)
+    win.tabs.setCurrentIndex(1)
+    win.btn_simple.setChecked(True)
+    win.simple_sliders["contrast"].setValue(0.5)
+    win.simple_sliders["contrast"].valueChanged.emit(0.5)
+    win.simple_sliders["sharpness"].valueChanged.emit(0.5)
+    win.simple_sliders["brightness"].valueChanged.emit(0.2)
+    s = win.entry.settings
+    assert s.stretch and s.equalize == pytest.approx(0.3)
+    assert s.sharpen_amount == pytest.approx(0.8) and s.midtones == pytest.approx(0.2)
+    # Erweiterte Regler zeigen dieselben Werte
+    assert win.sliders["equalize"].value() == pytest.approx(0.3)
+    # Voreinstellung aktualisiert die einfachen Regler
+    win._apply_preset_item(win.preset_list.item(0))
+    assert win.simple_sliders["contrast"].value() == 0
+    win.close()

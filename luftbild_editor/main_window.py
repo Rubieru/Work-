@@ -9,7 +9,8 @@ import numpy as np
 from PySide6.QtCore import (QEvent, QObject, QRunnable, QSettings, QSize, QStandardPaths, Qt,
                             QThreadPool, QTimer, Signal)
 from PySide6.QtGui import QAction, QIcon, QImage, QKeySequence, QPixmap
-from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QComboBox,
+from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QButtonGroup, QCheckBox,
+                               QComboBox,
                                QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
                                QInputDialog, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMainWindow, QMessageBox, QProgressDialog,
@@ -25,6 +26,7 @@ PREVIEW_LONG_SIDE = 2000
 log = logging.getLogger("luftbild_editor")
 LOG_FILE = ""
 THUMB_LONG_SIDE = 128
+MODE_STYLE = ("QPushButton:checked { background: #ffc400; color: #111; font-weight: bold; }")
 IMAGE_FILTER = "Bilder (*.tif *.tiff *.png *.jpg *.jpeg *.bmp *.jp2);;Alle Dateien (*)"
 
 
@@ -238,7 +240,9 @@ class MainWindow(QMainWindow):
             "Rahmen mit der linken Maustaste aufziehen, an Ecken und Kanten anpassen "
             "oder die Werte unten exakt eingeben.\n\n"
             "Mausrad: zoomen (bei starker Vergrößerung erscheint ein Pixelraster). "
-            "Rechte Maustaste: Bild verschieben."))
+            "Rechte Maustaste: Bild verschieben.\n\n"
+            "Der Zuschnitt wird sofort übernommen – kein Bestätigen nötig. Unter "
+            "„2 Verbessern“ und beim Speichern wird nur noch der Ausschnitt verwendet."))
 
         g = QGroupBox("Ausschnitt (Pixel)")
         form = QFormLayout(g)
@@ -291,6 +295,51 @@ class MainWindow(QMainWindow):
             "Leertaste gedrückt halten = Original zeigen. Zum Beurteilen der Schärfe "
             "hineinzoomen – vergrößerte Ausschnitte werden in voller Auflösung berechnet."))
 
+        # ---- Umschalter Einfach / Erweitert
+        row = QHBoxLayout()
+        self.btn_simple = QPushButton("Einfach")
+        self.btn_adv = QPushButton("Erweitert")
+        group = QButtonGroup(self)
+        for b in (self.btn_simple, self.btn_adv):
+            b.setCheckable(True)
+            b.setMinimumHeight(30)
+            group.addButton(b)
+            row.addWidget(b)
+        group.setExclusive(True)
+        self.btn_simple.setStyleSheet(MODE_STYLE)
+        self.btn_adv.setStyleSheet(MODE_STYLE)
+        lay.addLayout(row)
+
+        # ---- Einfach: drei Regler
+        self.simple_panel = QWidget()
+        sl = QVBoxLayout(self.simple_panel)
+        sl.setContentsMargins(0, 4, 0, 0)
+        self.simple_sliders = {
+            "contrast": LabeledSlider(
+                "Kontrast", 0, 1, 0.01, 0.0, decimals=0, suffix=" %", display_factor=100,
+                tooltip="Streckt das Histogramm und gleicht den Kontrast je Bildbereich aus. "
+                        "0 % = Original."),
+            "sharpness": LabeledSlider(
+                "Schärfe", 0, 1, 0.01, 0.0, decimals=0, suffix=" %", display_factor=100,
+                tooltip="Betont Kanten. Filmkorn wird dabei geschont."),
+            "brightness": LabeledSlider(
+                "Helligkeit", -1, 1, 0.01, 0.0, decimals=0, display_factor=100,
+                tooltip="Hellt die mittleren Grautöne auf (+) oder dunkelt sie ab (−)."),
+        }
+        for key, w_ in self.simple_sliders.items():
+            w_.valueChanged.connect(lambda v, k=key: self._set_simple(k, v))
+            sl.addWidget(w_)
+        sl.addWidget(self._info(
+            "Tipp: Links eine Voreinstellung wählen und hier nachregeln. "
+            "Unter „Erweitert“ gibt es alle Einstellungen einzeln."))
+        lay.addWidget(self.simple_panel)
+
+        # ---- Erweitert: alle Regler
+        self.adv_panel = QWidget()
+        adv_lay = QVBoxLayout(self.adv_panel)
+        adv_lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.adv_panel)
+
         self.sliders: dict[str, LabeledSlider] = {}
 
         def add(layout, key, *args, **kw):
@@ -335,7 +384,7 @@ class MainWindow(QMainWindow):
             display_factor=100,
             tooltip="Verstärkt Kontraste zwischen benachbarten Flächen "
                     "(Felder, Wald, Bebauung).")
-        lay.addWidget(g)
+        adv_lay.addWidget(g)
 
         g = QGroupBox("Schärfen")
         gl = QVBoxLayout(g)
@@ -348,7 +397,7 @@ class MainWindow(QMainWindow):
             display_factor=255, suffix=" Stufen",
             tooltip="Schwache Helligkeitsunterschiede (z. B. Filmkorn) werden nicht "
                     "geschärft. Erhöhen, wenn das Korn zu stark wird.")
-        lay.addWidget(g)
+        adv_lay.addWidget(g)
 
         g = QGroupBox("Bildfehler")
         gl = QVBoxLayout(g)
@@ -364,11 +413,16 @@ class MainWindow(QMainWindow):
         self.chk_invert = QCheckBox("Negativ umkehren")
         self.chk_invert.toggled.connect(lambda v: self._set_value("invert", v))
         gl.addWidget(self.chk_invert)
-        lay.addWidget(g)
+        adv_lay.addWidget(g)
 
         reset = QPushButton("Alle Regler zurücksetzen")
         reset.clicked.connect(lambda: self._apply_tonal({}))
         lay.addWidget(reset)
+
+        advanced = QSettings().value("advanced_mode", False, type=bool)
+        (self.btn_adv if advanced else self.btn_simple).setChecked(True)
+        self._show_mode(advanced)
+        self.btn_adv.toggled.connect(self._show_mode)
         lay.addStretch(1)
         return w
 
@@ -671,14 +725,54 @@ class MainWindow(QMainWindow):
         self._set_settings(replace(self.entry.settings, **{key: value}))
         if key == "stretch":
             self._update_enabled()
+        self._sync_simple()
 
     def _apply_tonal(self, values):
         if self.entry:
             self._set_settings(P.with_tonal(self.entry.settings, values), sync=True)
             self._t_history.start(0)
 
-    def _sync_controls(self):
+    # ---- Einfach-Modus
+    def _show_mode(self, advanced):
+        self.simple_panel.setVisible(not advanced)
+        self.adv_panel.setVisible(advanced)
+        QSettings().setValue("advanced_mode", bool(advanced))
+
+    def _set_simple(self, key, v):
+        if not self.entry:
+            return
+        s = self.entry.settings
+        if key == "contrast":
+            if v <= 0:
+                new = replace(s, stretch=False, equalize=0.0)
+            else:
+                clip = round(0.1 + 1.0 * v, 2)
+                new = replace(s, stretch=True, clip_black=clip, clip_white=clip,
+                              equalize=round(0.6 * v, 3))
+        elif key == "sharpness":
+            new = replace(s, sharpen_amount=round(1.6 * v, 3),
+                          sharpen_threshold=s.sharpen_threshold or 0.01)
+        else:
+            new = replace(s, midtones=v)
+        self.preset_list.clearSelection()
+        self._set_settings(new)
+        self._sync_controls(simple=False)
+
+    def _sync_simple(self):
         s = self.entry.settings if self.entry else P.Settings()
+        contrast = 0.0
+        if s.stretch:
+            contrast = max(s.equalize / 0.6, (s.clip_black + s.clip_white) / 2 - 0.1, 0.01)
+        values = {"contrast": min(contrast, 1.0),
+                  "sharpness": min(s.sharpen_amount / 1.6, 1.0),
+                  "brightness": s.midtones}
+        for k, w_ in self.simple_sliders.items():
+            w_.setValue(values[k])
+
+    def _sync_controls(self, simple=True):
+        s = self.entry.settings if self.entry else P.Settings()
+        if simple:
+            self._sync_simple()
         for key, sl in self.sliders.items():
             sl.setValue(getattr(s, key))
         for chk, key in ((self.chk_stretch, "stretch"), (self.chk_invert, "invert"),

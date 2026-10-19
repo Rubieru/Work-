@@ -373,7 +373,7 @@ class Globals:
 
 CLAHE_TILES = 8       # Kacheln entlang der langen Bildseite
 CLAHE_BINS = 512
-CLAHE_CLIP = 3.0      # Begrenzung relativ zur mittleren Histogrammhöhe
+CLAHE_CLIP = 2.0      # Begrenzung relativ zur mittleren Histogrammhöhe
 
 
 def _stats_tonal(prep: Prepared, s: Settings) -> np.ndarray:
@@ -520,11 +520,13 @@ def apply_tonal(img: np.ndarray, prep: Prepared, s: Settings, glob: Globals,
         img = 1.0 - img
     if s.flatten > 0:
         img = _apply_gain(img, prep, s, x0, y0, scale)
-    if s.dust > 0:
-        # Staub/Kratzer: Ausreißer gegenüber dem Median der Umgebung ersetzen
+    if s.dust > 0 and scale >= 0.5:
+        # Staub/Kratzer: Ausreißer gegenüber dem Median der Umgebung ersetzen.
+        # In stark verkleinerten Ansichten sind die Punkte ohnehin unsichtbar; ein
+        # Median würde dort echte Bilddetails entfernen.
         lo, hi = glob.levels
         thr = (0.30 - 0.26 * s.dust) * (hi - lo)
-        med = cv2.medianBlur(img, 5 if scale >= 0.6 else 3)
+        med = cv2.medianBlur(img, 5 if scale >= 0.8 else 3)
         mask = np.abs(img - med) > thr
         img = np.where(mask, med, img)
     if s.denoise > 0:
@@ -546,14 +548,20 @@ def apply_tonal(img: np.ndarray, prep: Prepared, s: Settings, glob: Globals,
             img = img + s.clarity * (img - blur)
 
     if s.sharpen_amount > 0:
-        sigma = max(s.sharpen_radius * scale, 0.5)
+        sigma = s.sharpen_radius * scale
+        amount = s.sharpen_amount
+        if sigma < 0.5:
+            # In der verkleinerten Vorschau ist feines Schärfen kaum sichtbar. Statt es
+            # mit zu großem Radius zu übertreiben, wird es abgeschwächt dargestellt.
+            amount *= sigma / 0.5
+            sigma = 0.5
         blur = cv2.GaussianBlur(img, (0, 0), sigma, borderType=cv2.BORDER_REFLECT)
         detail = img - blur
         if s.sharpen_threshold > 0:
             t = s.sharpen_threshold
             weight = np.clip((np.abs(detail) - t) / t, 0.0, 1.0)
             detail *= weight
-        img = img + s.sharpen_amount * detail
+        img = img + amount * detail
 
     np.clip(img, 0.0, 1.0, out=img)
     return img
