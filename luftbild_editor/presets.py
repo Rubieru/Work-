@@ -55,6 +55,12 @@ BUILTIN_PRESETS: dict[str, dict] = {
         "equalize": 0.4, "sharpen_amount": 0.8, "sharpen_radius": 1.0,
         "sharpen_threshold": 0.008,
     },
+    "GIS / DGM sicher": {
+        # entspricht dem Gemini-Skript: Statistik aus der Bildmitte, 0,5/99,5 %,
+        # 10 % Puffer, Unscharf maskieren Sigma 1 / Stärke 50 %
+        "stretch": True, "clip_black": 0.5, "clip_white": 0.5, "stats_center": True,
+        "stretch_buffer": 0.1, "sharpen_amount": 0.5, "sharpen_radius": 1.0,
+    },
     "Negativ": {
         "invert": True, "stretch": True, "clip_black": 0.3, "clip_white": 0.3,
         "equalize": 0.35, "sharpen_amount": 0.8, "sharpen_radius": 1.0,

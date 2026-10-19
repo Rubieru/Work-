@@ -21,7 +21,7 @@ jobs:
           python-version: "3.12"
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
-      - run: pip install -r requirements.txt pytest
+      - run: pip install -r requirements.txt pytest rasterio
       - run: python -m pytest -q
 
   windows-exe:

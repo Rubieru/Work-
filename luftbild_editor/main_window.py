@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass, field, replace
 
 import numpy as np
-from PySide6.QtCore import (QEvent, QObject, QRunnable, QSize, QStandardPaths, Qt,
+from PySide6.QtCore import (QEvent, QObject, QRunnable, QSettings, QSize, QStandardPaths, Qt,
                             QThreadPool, QTimer, Signal)
 from PySide6.QtGui import QAction, QIcon, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QComboBox,
@@ -179,11 +179,19 @@ class MainWindow(QMainWindow):
             "QPushButton:disabled { background: #555; color: #888; }")
         self.btn_export.clicked.connect(self.export_current)
         rl.addWidget(self.btn_export)
-        self.btn_batch = QPushButton("Stapelverarbeitung: Einstellungen auf weitere Bilder …")
+        self.btn_batch = QPushButton("Stapelverarbeitung (mehrere Bilder) …")
         self.btn_batch.setToolTip("Die aktuellen Einstellungen auf viele Bilder anwenden "
                                   "und alle auf einmal speichern.")
         self.btn_batch.clicked.connect(self.batch)
         rl.addWidget(self.btn_batch)
+        self.chk_nodata = QCheckBox("Für GIS: Pixelwert 0 vermeiden (NoData-sicher)")
+        self.chk_nodata.setToolTip(
+            "Schwarz wird als 1 statt 0 gespeichert. Viele GIS-Programme werten 0 als "
+            "„keine Daten“ und würden dunkle Bildstellen sonst durchsichtig darstellen.")
+        self.chk_nodata.setChecked(
+            QSettings().value("nodata_safe", False, type=bool))
+        self.chk_nodata.toggled.connect(lambda v: QSettings().setValue("nodata_safe", v))
+        rl.addWidget(self.chk_nodata)
 
         split = QSplitter()
         split.addWidget(left)
@@ -304,6 +312,16 @@ class MainWindow(QMainWindow):
             tooltip="Anteil der dunkelsten Pixel, die ganz schwarz werden.")
         add(gl, "clip_white", "Weiß abschneiden", 0, 5, 0.05, 0.5, suffix=" %",
             tooltip="Anteil der hellsten Pixel, die ganz weiß werden.")
+        add(gl, "stretch_buffer", "Puffer (Detailschutz)", 0, 0.3, 0.01, 0.0, decimals=0,
+            suffix=" %", display_factor=100,
+            tooltip="Streckt etwas weniger hart, damit in sehr hellen und sehr dunklen "
+                    "Bereichen keine Details verloren gehen (Gemini-Skript: 10 %).")
+        self.chk_center = QCheckBox("Werte nur aus der Bildmitte messen")
+        self.chk_center.setToolTip(
+            "Für die Streckung werden 25 % Rand ignoriert – Bildrahmen, Messmarken, "
+            "Beschriftungen und Wolken am Rand verfälschen das Ergebnis dann nicht.")
+        self.chk_center.toggled.connect(lambda v: self._set_value("stats_center", v))
+        gl.addWidget(self.chk_center)
         add(gl, "equalize", "Kontrastausgleich je Bildbereich", 0, 1, 0.01, 0.0,
             decimals=0, suffix=" %", display_factor=100,
             tooltip="Histogrammausgleich in einzelnen Bildbereichen mit weichen Übergängen "
@@ -516,8 +534,9 @@ class MainWindow(QMainWindow):
             sb.blockSignals(False)
         bits = f"{self.doc.bits} Bit"
         dpi = f", {self.doc.dpi:.0f} dpi" if self.doc.dpi else ""
+        geo = ", georeferenziert (bleibt beim Speichern erhalten)" if self.doc.geo else ""
         self.statusBar().showMessage(
-            f"{os.path.basename(self.entry.path)}: {w} × {h} px, {bits}{dpi}", 8000)
+            f"{os.path.basename(self.entry.path)}: {w} × {h} px, {bits}{dpi}{geo}", 12000)
         self._sync_controls()
         self._update_enabled()
         self._on_tab(self.tabs.currentIndex())
@@ -662,7 +681,8 @@ class MainWindow(QMainWindow):
         s = self.entry.settings if self.entry else P.Settings()
         for key, sl in self.sliders.items():
             sl.setValue(getattr(s, key))
-        for chk, key in ((self.chk_stretch, "stretch"), (self.chk_invert, "invert")):
+        for chk, key in ((self.chk_stretch, "stretch"), (self.chk_invert, "invert"),
+                         (self.chk_center, "stats_center")):
             chk.blockSignals(True)
             chk.setChecked(getattr(s, key))
             chk.blockSignals(False)
@@ -695,8 +715,9 @@ class MainWindow(QMainWindow):
         self.a_undo.setEnabled(bool(e and e.hist_idx > 0))
         self.a_redo.setEnabled(bool(e and e.hist_idx < len(e.history) - 1))
         stretch = bool(e and e.settings.stretch)
-        for k in ("clip_black", "clip_white"):
+        for k in ("clip_black", "clip_white", "stretch_buffer"):
             self.sliders[k].setEnabled(stretch)
+        self.chk_center.setEnabled(stretch)
         item = self.preset_list.currentItem()
         self.btn_del_preset.setEnabled(
             bool(item and item.isSelected() and item.data(Qt.UserRole) in self.user_presets))
@@ -904,11 +925,13 @@ class MainWindow(QMainWindow):
         if os.path.splitext(path)[1].lower() not in (ext, ".tiff", ".jpeg"):
             path += ext
         doc, s = self.doc, self.entry.settings
+        nodata_safe = self.chk_nodata.isChecked()
         self._start_progress("Bild wird in voller Auflösung gespeichert …")
         sig = self.sig
 
         def job():
-            P.export(doc, s, path, fmt, progress=lambda i, n: sig.progress.emit(i, n))
+            P.export(doc, s, path, fmt, progress=lambda i, n: sig.progress.emit(i, n),
+                     nodata_safe=nodata_safe)
             return [path]
 
         self._submit("export", job)
@@ -934,11 +957,11 @@ class MainWindow(QMainWindow):
                 e.history.append(e.settings)
                 e.hist_idx = len(e.history) - 1
         self._start_progress(f"{len(job.files)} Bilder werden bearbeitet …", cancel=True)
-        sig, dlg_ref = self.sig, self._progress
+        sig, nodata_safe = self.sig, self.chk_nodata.isChecked()
         self._batch_cancel = False
 
         def job_fn():
-            return run_batch(job, settings,
+            return run_batch(job, settings, nodata_safe=nodata_safe,
                              progress=lambda i, n: sig.progress.emit(i, n),
                              cancelled=lambda: self._batch_cancel, current_doc=current)
 

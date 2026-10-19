@@ -18,6 +18,8 @@ from dataclasses import asdict, dataclass, fields, replace
 import cv2
 import numpy as np
 
+from .geo import geotiff_tags, output_affine, read_geo, write_sidecars
+
 try:  # tifffile liest/schreibt große und 16-Bit-TIFFs inkl. DPI zuverlässig
     import tifffile
 except ImportError:  # pragma: no cover - optional
@@ -44,6 +46,8 @@ class Settings:
     stretch: bool = False          # Histogrammstreckung an/aus
     clip_black: float = 0.5        # % der dunkelsten Pixel, die schwarz werden
     clip_white: float = 0.5        # % der hellsten Pixel, die weiß werden
+    stats_center: bool = True      # Statistik nur aus der Bildmitte (ohne Rahmen/Texte)
+    stretch_buffer: float = 0.0    # Puffer 0..0.3: Streckung weniger hart (Detailschutz)
     midtones: float = 0.0          # -1 (dunkler) .. +1 (heller)
     equalize: float = 0.0          # Kontrastausgleich je Bildbereich (CLAHE) 0..1
     clarity: float = 0.0           # lokaler Kontrast 0..1
@@ -100,6 +104,7 @@ class LoadedImage:
     data: np.ndarray   # float32, 0..1, 2D
     bits: int          # 8 oder 16 (Herkunft)
     dpi: float | None
+    geo: object = None  # geo.Geo, falls georeferenziert
 
 
 def _to_gray_float(arr: np.ndarray, rgb_order: bool) -> tuple[np.ndarray, int]:
@@ -150,10 +155,14 @@ def load_image(path: str) -> LoadedImage:
                 except Exception:
                     dpi = None
                 photometric = int(getattr(page, "photometric", 1))
+                try:
+                    geo = read_geo(path, page)
+                except Exception:
+                    geo = None
             data, bits = _to_gray_float(arr, rgb_order=True)
             if photometric == 0:  # MINISWHITE: 0 = weiß
                 data = 1.0 - data
-            return LoadedImage(np.ascontiguousarray(data), bits, dpi)
+            return LoadedImage(np.ascontiguousarray(data), bits, dpi, geo)
         except Exception:
             pass  # Fallback auf OpenCV
     # np.fromfile + imdecode funktioniert auch mit Umlauten im Pfad (Windows)
@@ -162,7 +171,7 @@ def load_image(path: str) -> LoadedImage:
     if arr is None:
         raise ValueError(f"Bild konnte nicht gelesen werden: {path}")
     data, bits = _to_gray_float(arr, rgb_order=False)
-    return LoadedImage(np.ascontiguousarray(data), bits, None)
+    return LoadedImage(np.ascontiguousarray(data), bits, None, read_geo(path))
 
 
 EXPORT_FORMATS = {
@@ -173,24 +182,36 @@ EXPORT_FORMATS = {
 }
 
 
-def to_uint(img: np.ndarray, bits: int) -> np.ndarray:
+def to_uint(img: np.ndarray, bits: int, nodata_safe: bool = False) -> np.ndarray:
+    """In Ganzzahlen umwandeln. nodata_safe: Wert 0 wird nie vergeben (1..max),
+    weil GIS-Programme 0 oft als „keine Daten“ (NoData) behandeln."""
     img = np.clip(img, 0.0, 1.0)
-    if bits == 16:
-        return (img * 65535.0 + 0.5).astype(np.uint16)
-    return (img * 255.0 + 0.5).astype(np.uint8)
+    top = 65535.0 if bits == 16 else 255.0
+    if nodata_safe:
+        out = img * (top - 1.0) + 1.5
+    else:
+        out = img * top + 0.5
+    return out.astype(np.uint16 if bits == 16 else np.uint8)
 
 
-def save_image(path: str, arr: np.ndarray, fmt: str, dpi: float | None = None) -> None:
+def save_image(path: str, arr: np.ndarray, fmt: str, dpi: float | None = None,
+               geo=None, geo_affine=None) -> None:
     if fmt in ("tif16", "tif8") and tifffile is not None:
         kwargs = {"photometric": "minisblack", "compression": "zlib"}
         if dpi:
             kwargs["resolution"] = (float(dpi), float(dpi))
             kwargs["resolutionunit"] = "INCH"
+        if geo is not None:
+            kwargs["extratags"] = geotiff_tags(geo, geo_affine)
+        if arr.nbytes > 3_500_000_000:
+            kwargs["bigtiff"] = True
         try:
             tifffile.imwrite(path, arr, **kwargs)
         except Exception:
             kwargs.pop("compression")
             tifffile.imwrite(path, arr, **kwargs)
+        if geo is not None:  # World-File nur, wenn das Original eines hatte
+            write_sidecars(geo, geo_affine, path, world_file=not geo.from_geotiff)
         return
     ext = EXPORT_FORMATS[fmt][1]
     params = []
@@ -200,6 +221,8 @@ def save_image(path: str, arr: np.ndarray, fmt: str, dpi: float | None = None) -
     if not ok:
         raise IOError(f"Bild konnte nicht gespeichert werden: {path}")
     enc.tofile(path)
+    if geo is not None:
+        write_sidecars(geo, geo_affine, path, world_file=True)
 
 
 # --------------------------------------------------------------------------
@@ -273,6 +296,7 @@ class Document:
         self.original = loaded.data
         self.bits = loaded.bits
         self.dpi = loaded.dpi
+        self.geo = loaded.geo
         self.path = path
         self._lock = threading.Lock()
         self._rot_key = None
@@ -367,9 +391,22 @@ def compute_levels(prep: Prepared, s: Settings) -> tuple[float, float]:
     if not s.stretch:
         return 0.0, 1.0
     st = _stats_tonal(prep, s)
-    sample = st[::2, ::2] if st.size > 1_500_000 else st
+    raw = prep.stats
+    if s.stats_center:
+        # wie das Gemini-Skript: 25 % Rand ignorieren (Rahmen, Messmarken, Beschriftung)
+        h, w = st.shape
+        my, mx = h // 4, w // 4
+        st, raw = st[my:h - my, mx:w - mx], raw[my:h - my, mx:w - mx]
+    sample = st[raw > 0]  # Wert 0 = keine Daten (NoData) nicht mitzählen
+    if sample.size < 100:
+        sample = st.ravel()
+    if sample.size > 1_500_000:
+        sample = sample[::2]
     lo, hi = np.percentile(sample, [s.clip_black, 100.0 - s.clip_white])
     lo, hi = float(lo), float(hi)
+    if s.stretch_buffer > 0:
+        span = hi - lo
+        lo, hi = max(0.0, lo - span * s.stretch_buffer), min(1.0, hi + span * s.stretch_buffer)
     if hi - lo < 1e-4:
         hi = lo + 1e-4
     return lo, hi
@@ -573,7 +610,7 @@ def render(prep: Prepared, s: Settings, region=None, scale: float = 1.0,
 
 
 def render_full(doc: Document, s: Settings, bits: int = 16, tile: int = 2048,
-                progress=None) -> np.ndarray:
+                progress=None, nodata_safe: bool = False) -> np.ndarray:
     """Volle Auflösung, gekachelt (spart Arbeitsspeicher bei großen Scans)."""
     prep = doc.prepare(s)
     glob = compute_globals(prep, s)
@@ -582,16 +619,22 @@ def render_full(doc: Document, s: Settings, bits: int = 16, tile: int = 2048,
     tiles = [(x, y) for y in range(0, H, tile) for x in range(0, W, tile)]
     for i, (x, y) in enumerate(tiles):
         w, h = min(tile, W - x), min(tile, H - y)
-        out[y:y + h, x:x + w] = to_uint(render(prep, s, (x, y, w, h), 1.0, glob), bits)
+        out[y:y + h, x:x + w] = to_uint(render(prep, s, (x, y, w, h), 1.0, glob), bits,
+                                        nodata_safe)
         if progress:
             progress(i + 1, len(tiles))
     return out
 
 
-def export(doc: Document, s: Settings, path: str, fmt: str, progress=None) -> None:
+def export(doc: Document, s: Settings, path: str, fmt: str, progress=None,
+           nodata_safe: bool = False) -> None:
     bits = 16 if fmt == "tif16" else 8
-    arr = render_full(doc, s, bits=bits, progress=progress)
-    save_image(path, arr, fmt, doc.dpi)
+    arr = render_full(doc, s, bits=bits, progress=progress, nodata_safe=nodata_safe)
+    affine = None
+    if doc.geo is not None:
+        w, h = doc.size
+        affine = output_affine(doc.geo, (w, h), s.rotation, clamp_crop(s.crop, w, h))
+    save_image(path, arr, fmt, doc.dpi, doc.geo, affine)
 
 
 def histogram(img: np.ndarray, bins: int = 256) -> np.ndarray:

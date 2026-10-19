@@ -34,7 +34,7 @@ class BatchDialog(QDialog):
         info = QLabel(
             f"Die Einstellungen von <b>{source_name}</b> werden auf alle angehakten Bilder "
             "angewendet. Die Bilder werden in voller Auflösung bearbeitet und gespeichert. "
-            "Die Originale bleiben unverändert.")
+            "Die Originale bleiben unverändert, eine Georeferenzierung wird übernommen.")
         info.setWordWrap(True)
         lay.addWidget(info)
 
@@ -134,7 +134,8 @@ class BatchDialog(QDialog):
 
 
 def run_batch(job: BatchJob, settings: P.Settings, progress=None, cancelled=None,
-              current_doc: P.Document | None = None) -> tuple[list, list]:
+              current_doc: P.Document | None = None,
+              nodata_safe: bool = False) -> tuple[list, list]:
     """Bearbeitet alle Bilder. Gibt (geschriebene Dateien, Fehler) zurück."""
     os.makedirs(job.folder, exist_ok=True)
     ext = P.EXPORT_FORMATS[job.fmt][1]
@@ -149,7 +150,7 @@ def run_batch(job: BatchJob, settings: P.Settings, progress=None, cancelled=None
             out = os.path.join(job.folder, stem + job.suffix + ext)
             if os.path.abspath(out) == os.path.abspath(src):
                 out = os.path.join(job.folder, stem + job.suffix + "_1" + ext)
-            P.export(doc, s, out, job.fmt)
+            P.export(doc, s, out, job.fmt, nodata_safe=nodata_safe)
             written.append(out)
         except Exception as exc:  # ein defektes Bild soll den Stapel nicht abbrechen
             errors.append((src, f"{type(exc).__name__}: {exc}"))

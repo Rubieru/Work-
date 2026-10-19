@@ -26,26 +26,38 @@ Live-Vorschau und Voreinstellungen zum schnellen Ausprobieren.
 | Bereich | Regler | Wozu |
 |---|---|---|
 | Kontrast | **Histogramm strecken**, Schwarz/Weiß abschneiden | Spreizt flaue Grauwerte auf den vollen Bereich |
-| | Mitteltöne | Mittlere Grautöne heller oder dunkler |
-| | Lokaler Kontrast | Hebt Felder, Wald und Bebauung voneinander ab |
+| | Puffer (Detailschutz) | Streckt weniger hart, damit in sehr hellen und dunklen Bereichen nichts verloren geht |
+| | Werte nur aus der Bildmitte messen | Rahmen, Messmarken und Beschriftung verfälschen die Streckung nicht |
+| | **Kontrastausgleich je Bildbereich** | CLAHE bzw. „Multidodging“: holt Details aus flauen und dunklen Partien |
+| | Mitteltöne, Lokaler Kontrast | Feinabstimmung |
 | Schärfen | Stärke, Radius, Schwelle | Unscharf maskieren. Die Schwelle verhindert, dass Filmkorn mitgeschärft wird |
-| Bildfehler | Filmkorn reduzieren | Kantenerhaltendes Glätten |
+| Bildfehler | Staub & Kratzer entfernen | Entfernt kleine Punkte und feine Kratzer vom Scan |
+| | Filmkorn reduzieren | Kantenerhaltendes Glätten |
 | | Ausleuchtung ausgleichen | Gleicht dunkle Ränder und Vignettierung aus |
 | | Negativ umkehren | Für gescannte Negative |
 
-Die Voreinstellungen sind: Original, Standard, Kräftig, Flaues Bild, Ungleich belichtet,
-Körnig/verrauscht, Feine Details, Dunkler Scan und Negativ. Eigene Voreinstellungen lassen
-sich mit „Aktuelle speichern…“ anlegen.
+**Voreinstellungen:** Original, Standard Luftbild, Flau/kontrastarm, Ungleich belichtet,
+Details/Auswertung, Grobkörnig, Staub & Kratzer, Zu dunkel, Zu hell, GIS/DGM sicher und Negativ.
+„GIS/DGM sicher“ entspricht dem Gemini-Skript: Statistik aus der Bildmitte, 0,5/99,5 %,
+10 % Puffer und Schärfen mit Sigma 1 und Stärke 50 %. Eigene Voreinstellungen lassen sich mit
+„Aktuelle speichern…“ anlegen.
 
-Weitere Funktionen:
+**Georeferenzierung:** GeoTIFF-Koordinaten, Koordinatensystem sowie World-Files (.tfw/.jgw/.pgw)
+und .prj bleiben beim Speichern erhalten. Zuschnitt und Drehung werden dabei korrekt
+umgerechnet. Die Option *„Für GIS: Pixelwert 0 vermeiden“* speichert Schwarz als 1, damit
+GIS-Programme dunkle Stellen nicht als NoData behandeln.
 
-- Mehrere Bilder öffnen, auch per Drag & Drop.
-- Rückgängig/Wiederholen mit Strg+Z und Strg+Y.
-- *Bearbeiten → Regler-Einstellungen auf alle Bilder übertragen* (für eine ganze Befliegung).
-- *Datei → Alle Bilder speichern*.
+**Stapelverarbeitung:** Mit dem Knopf unter „Bild speichern“ oder Strg+B werden die
+Einstellungen des aktuellen Bildes auf weitere Bilder oder ganze Ordner angewendet. Auf Wunsch
+werden Zuschnitt und Drehung mit übernommen.
+
+Weitere Funktionen: mehrere Bilder öffnen (auch per Drag & Drop) sowie Rückgängig/Wiederholen
+mit Strg+Z und Strg+Y.
 
 Große Scans werden für die Vorschau verkleinert berechnet. Beim Hineinzoomen und beim Speichern
 rechnet das Programm in voller Auflösung, und zwar so, dass Vorschau und Ergebnis übereinstimmen.
+
+**Fehlerprotokoll:** `%APPDATA%\Luftbild-Editor\protokoll.txt`
 
 ## Installation unter Windows
 
@@ -72,3 +84,5 @@ Aufbau:
 - `luftbild_editor/widgets.py`: Bildansicht mit Zuschneiderahmen, Regler, Histogramm
 - `luftbild_editor/main_window.py`: Hauptfenster
 - `luftbild_editor/presets.py`: Voreinstellungen
+- `luftbild_editor/batch.py`: Stapelverarbeitung
+- `luftbild_editor/geo.py`: Georeferenzierung
