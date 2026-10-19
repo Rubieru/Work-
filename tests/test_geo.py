@@ -67,13 +67,16 @@ def test_world_file_and_nodata_safe(tmp_path):
     assert P.load_image(str(out)).data.min() > 0  # kein Pixel mit Wert 0
 
 
-def test_center_statistics_ignore_frame():
+def test_border_statistics_ignore_scan_frame():
     img = np.full((400, 400), 0.4, np.float32)
-    img[100:300, 100:300] = np.linspace(0.3, 0.6, 200)[None, :]
-    img[:20, :] = 1.0  # heller Rand / Beschriftung
+    img[:, :] = np.linspace(0.3, 0.6, 400)[None, :]
+    img[:12, :] = 0.0       # schwarzer Scanrahmen
+    img[-12:, :] = 0.0
+    img[3:9, 150:250] = 1.0  # weiße Bildnummer im Rahmen
     doc = P.Document(P.LoadedImage(img, 8, None))
     s = P.Settings(stretch=True, clip_black=0.5, clip_white=0.5)
     lo, hi = P.compute_levels(doc.prepare(s), s)
-    assert hi < 0.7
-    lo2, hi2 = P.compute_levels(doc.prepare(s), P.Settings(stretch=True, stats_center=False))
-    assert hi2 > 0.9
+    assert lo > 0.25 and hi < 0.65
+    _, hi2 = P.compute_levels(doc.prepare(s), P.Settings(stretch=True, stats_center=False,
+                                                          clip_white=0.1))
+    assert hi2 > 0.9  # ohne Randerkennung zählt die weiße Bildnummer mit

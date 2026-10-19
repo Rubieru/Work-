@@ -370,10 +370,10 @@ class MainWindow(QMainWindow):
             suffix=" %", display_factor=100,
             tooltip="Streckt etwas weniger hart, damit in sehr hellen und sehr dunklen "
                     "Bereichen keine Details verloren gehen (Gemini-Skript: 10 %).")
-        self.chk_center = QCheckBox("Werte nur aus der Bildmitte messen")
+        self.chk_center = QCheckBox("Bildrand nicht mitmessen")
         self.chk_center.setToolTip(
-            "Für die Streckung werden 25 % Rand ignoriert – Bildrahmen, Messmarken, "
-            "Beschriftungen und Wolken am Rand verfälschen das Ergebnis dann nicht.")
+            "Der schwarze Scanrahmen und ein schmaler Randstreifen (Messmarken, "
+            "Bildnummer) werden bei der Streckung ignoriert.")
         self.chk_center.toggled.connect(lambda v: self._set_value("stats_center", v))
         gl.addWidget(self.chk_center)
         add(gl, "equalize", "Kontrastausgleich je Bildbereich", 0, 1, 0.01, 0.0,
@@ -805,9 +805,10 @@ class MainWindow(QMainWindow):
             if v <= 0:
                 new = replace(s, stretch=False, equalize=0.0)
             else:
-                clip = round(0.1 + 1.0 * v, 2)
-                new = replace(s, stretch=True, clip_black=clip, clip_white=clip,
-                              equalize=round(0.6 * v, 3))
+                # Weiß kaum abschneiden: helle Details (z. B. Bombentrichter) erhalten
+                new = replace(s, stretch=True, clip_black=round(0.1 + 0.4 * v, 2),
+                              clip_white=round(0.05 + 0.15 * v, 2),
+                              equalize=round(0.7 * v, 3))
         elif key == "sharpness":
             new = replace(s, sharpen_amount=round(1.6 * v, 3),
                           sharpen_threshold=s.sharpen_threshold or 0.01)
@@ -821,7 +822,7 @@ class MainWindow(QMainWindow):
         s = self.entry.settings if self.entry else P.Settings()
         contrast = 0.0
         if s.stretch:
-            contrast = max(s.equalize / 0.6, (s.clip_black + s.clip_white) / 2 - 0.1, 0.01)
+            contrast = max(s.equalize / 0.7, 0.01)
         values = {"contrast": min(contrast, 1.0),
                   "sharpness": min(s.sharpen_amount / 1.6, 1.0),
                   "brightness": s.midtones}

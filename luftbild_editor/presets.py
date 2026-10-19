@@ -17,55 +17,55 @@ from .processing import TONAL_FIELDS
 #   Schwelle verhindert, dass Filmkorn mitgeschärft wird.
 _SHARP = {"sharpen_amount": 0.7, "sharpen_radius": 1.0, "sharpen_threshold": 0.01}
 
+# Abgestimmt an echten Weltkriegs-Luftbildern (Flugplatz mit Bombentrichtern, Wald,
+# Felder): Ziel ist kaum reines Schwarz/Weiß (helle Trichter und dunkler Wald behalten
+# Zeichnung) bei möglichst viel lokalem Kontrast. Weiß wird deshalb kaum abgeschnitten.
 BUILTIN_PRESETS: dict[str, dict] = {
     "Original": {},
     "Standard Luftbild": {
-        "stretch": True, "clip_black": 0.3, "clip_white": 0.3, "stretch_buffer": 0.03,
-        "equalize": 0.25, **_SHARP,
+        "stretch": True, "clip_black": 0.2, "clip_white": 0.1, "stretch_buffer": 0.02,
+        "equalize": 0.35, "midtones": 0.1, **_SHARP,
     },
     "Flau / kontrastarm": {
-        "stretch": True, "clip_black": 0.8, "clip_white": 0.5, "equalize": 0.5,
-        "sharpen_amount": 0.7, "sharpen_radius": 1.2, "sharpen_threshold": 0.01,
+        "stretch": True, "clip_black": 0.4, "clip_white": 0.1, "equalize": 0.6,
+        "midtones": 0.1, **_SHARP,
     },
-    "Ungleich belichtet": {
-        "flatten": 0.7, "stretch": True, "clip_black": 0.4, "clip_white": 0.4,
-        "equalize": 0.3, "sharpen_amount": 0.6, "sharpen_radius": 1.0,
-        "sharpen_threshold": 0.01,
-    },
-    "Details / Auswertung": {
-        "stretch": True, "clip_black": 0.4, "clip_white": 0.4, "equalize": 0.4,
-        "clarity": 0.15, "sharpen_amount": 1.1, "sharpen_radius": 0.9,
+    "Bombentrichter / Details": {
+        "stretch": True, "clip_black": 0.2, "clip_white": 0.05, "equalize": 0.45,
+        "clarity": 0.15, "midtones": 0.05, "sharpen_amount": 1.0, "sharpen_radius": 0.9,
         "sharpen_threshold": 0.012,
     },
+    "Ungleich belichtet": {
+        "flatten": 0.6, "stretch": True, "clip_black": 0.2, "clip_white": 0.1,
+        "equalize": 0.35, "midtones": 0.1, **_SHARP,
+    },
+    "Dunkler Wald aufhellen": {
+        "stretch": True, "clip_black": 0.1, "clip_white": 0.2, "equalize": 0.4,
+        "midtones": 0.35, **_SHARP,
+    },
+    "Helle Flächen betonen": {
+        "stretch": True, "clip_black": 0.2, "clip_white": 0.05, "equalize": 0.45,
+        "midtones": -0.15, **_SHARP,
+    },
     "Grobkörnig": {
-        "dust": 0.3, "denoise": 0.5, "stretch": True, "clip_black": 0.4,
-        "clip_white": 0.4, "equalize": 0.2, "sharpen_amount": 0.5,
+        "dust": 0.3, "denoise": 0.5, "stretch": True, "clip_black": 0.2,
+        "clip_white": 0.1, "equalize": 0.3, "midtones": 0.1, "sharpen_amount": 0.5,
         "sharpen_radius": 1.5, "sharpen_threshold": 0.025,
     },
     "Staub & Kratzer": {
-        "dust": 0.7, "denoise": 0.15, "stretch": True, "clip_black": 0.3,
-        "clip_white": 0.3, "equalize": 0.2, "sharpen_amount": 0.5,
+        "dust": 0.7, "denoise": 0.15, "stretch": True, "clip_black": 0.2,
+        "clip_white": 0.1, "equalize": 0.3, "midtones": 0.1, "sharpen_amount": 0.5,
         "sharpen_radius": 1.0, "sharpen_threshold": 0.015,
     },
-    "Zu dunkel": {
-        "stretch": True, "clip_black": 0.2, "clip_white": 0.8, "midtones": 0.3,
-        "equalize": 0.3, "sharpen_amount": 0.6, "sharpen_radius": 1.0,
-        "sharpen_threshold": 0.01,
-    },
-    "Zu hell": {
-        "stretch": True, "clip_black": 0.8, "clip_white": 0.2, "midtones": -0.25,
-        "equalize": 0.3, "sharpen_amount": 0.6, "sharpen_radius": 1.0,
-        "sharpen_threshold": 0.01,
-    },
     "GIS / DGM sicher": {
-        # entspricht dem Gemini-Skript: Statistik aus der Bildmitte, 0,5/99,5 %,
-        # 10 % Puffer, Unscharf maskieren Sigma 1 / Stärke 50 %
+        # entspricht dem Gemini-Skript: 0,5/99,5 %, 10 % Puffer,
+        # Unscharf maskieren Sigma 1 / Stärke 50 %
         "stretch": True, "clip_black": 0.5, "clip_white": 0.5, "stats_center": True,
         "stretch_buffer": 0.1, "sharpen_amount": 0.5, "sharpen_radius": 1.0,
     },
     "Negativ": {
-        "invert": True, "stretch": True, "clip_black": 0.3, "clip_white": 0.3,
-        "stretch_buffer": 0.03, "equalize": 0.25, **_SHARP,
+        "invert": True, "stretch": True, "clip_black": 0.2, "clip_white": 0.1,
+        "stretch_buffer": 0.02, "equalize": 0.35, **_SHARP,
     },
 }
 

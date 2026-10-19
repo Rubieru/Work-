@@ -46,7 +46,7 @@ class Settings:
     stretch: bool = False          # Histogrammstreckung an/aus
     clip_black: float = 0.5        # % der dunkelsten Pixel, die schwarz werden
     clip_white: float = 0.5        # % der hellsten Pixel, die weiß werden
-    stats_center: bool = True      # Statistik nur aus der Bildmitte (ohne Rahmen/Texte)
+    stats_center: bool = True      # Bildrand und schwarzen Scanrahmen nicht mitmessen
     stretch_buffer: float = 0.0    # Puffer 0..0.3: Streckung weniger hart (Detailschutz)
     midtones: float = 0.0          # -1 (dunkler) .. +1 (heller)
     equalize: float = 0.0          # Kontrastausgleich je Bildbereich (CLAHE) 0..1
@@ -56,6 +56,8 @@ class Settings:
     sharpen_amount: float = 0.0    # 0..3 (0..300 %)
     sharpen_radius: float = 1.0    # Pixel im Originalbild
     sharpen_threshold: float = 0.0 # 0..0.1 Schwelle gegen Kornverstärkung
+
+    protect: bool = True           # Lichter/Schatten weich begrenzen (Zeichnung erhalten)
 
 
 GEOMETRY_FIELDS = ("rotation", "crop")
@@ -420,11 +422,15 @@ def compute_levels(prep: Prepared, s: Settings) -> tuple[float, float]:
     st = _stats_tonal(prep, s)
     raw = prep.stats
     if s.stats_center:
-        # wie das Gemini-Skript: 25 % Rand ignorieren (Rahmen, Messmarken, Beschriftung)
+        # Bildrand ignorieren: einen schmalen Streifen (Messmarken, Beschriftung) und den
+        # schwarzen Scanrahmen. Ein breiter Rand wie im Gemini-Skript (25 %) würde bei
+        # Bildern mit hellem Zentrum dunkle Bereiche am Rand zu Schwarz strecken.
         h, w = st.shape
-        my, mx = h // 4, w // 4
+        my, mx = max(1, h // 25), max(1, w // 25)
         st, raw = st[my:h - my, mx:w - mx], raw[my:h - my, mx:w - mx]
-    sample = st[raw > 0]  # Wert 0 = keine Daten (NoData) nicht mitzählen
+        sample = st[raw > 3.0 / 255.0]  # schwarzer Rahmen / NoData
+    else:
+        sample = st[raw > 0]  # Wert 0 = keine Daten (NoData) nicht mitzählen
     if sample.size < 100:
         sample = st.ravel()
     if sample.size > 1_500_000:
@@ -590,8 +596,29 @@ def apply_tonal(img: np.ndarray, prep: Prepared, s: Settings, glob: Globals,
             detail *= weight
         img = img + amount * detail
 
+    if s.protect and (s.stretch or s.equalize > 0 or s.clarity > 0 or s.sharpen_amount > 0):
+        img = soft_clip(img)
     np.clip(img, 0.0, 1.0, out=img)
     return img
+
+
+SOFT_KNEE = 0.1  # Breite des weichen Übergangs an Schwarz und Weiß
+
+
+def soft_clip(img: np.ndarray, knee: float = SOFT_KNEE) -> np.ndarray:
+    """Lichter und Schatten weich begrenzen statt hart abschneiden.
+
+    Mitteltöne bleiben unverändert; Werte oberhalb 1-knee bzw. unterhalb knee laufen
+    sanft gegen Weiß/Schwarz. So behalten helle Bombentrichter, Dächer und Wege ihre
+    Zeichnung, auch wenn Schärfen oder Kontrastausgleich über Weiß hinausschießen.
+    """
+    hi = 1.0 - knee
+    out = img.copy()
+    m = img > hi
+    out[m] = hi + knee * np.tanh((img[m] - hi) / knee)
+    m = img < knee
+    out[m] = knee - knee * np.tanh((knee - img[m]) / knee)
+    return out
 
 
 def render(prep: Prepared, s: Settings, region=None, scale: float = 1.0,

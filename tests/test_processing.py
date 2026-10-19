@@ -31,7 +31,7 @@ def test_crop_is_clamped():
 
 def test_histogram_stretch_fills_range():
     doc = make_doc()
-    s = P.Settings(stretch=True, clip_black=0.5, clip_white=0.5)
+    s = P.Settings(stretch=True, clip_black=0.5, clip_white=0.5, protect=False)
     out = P.render(doc.prepare(s), s)
     assert out.min() == 0.0 and out.max() == 1.0
     assert np.percentile(out, 5) < 0.15 and np.percentile(out, 95) > 0.85
@@ -67,7 +67,7 @@ def test_preview_approximates_full_resolution():
 
 def test_region_render_shape():
     doc = make_doc()
-    s = P.with_tonal(P.Settings(), BUILTIN_PRESETS["Details / Auswertung"])
+    s = P.with_tonal(P.Settings(), BUILTIN_PRESETS["Bombentrichter / Details"])
     out = P.render(doc.prepare(s), s, (100, 50, 200, 120), 0.5)
     assert out.shape == (60, 100)
 
@@ -116,3 +116,12 @@ def test_equalize_increases_local_contrast():
     base = P.render(prep, P.Settings(stretch=True))
     assert out.std() > 0.9 * base.std()
     assert 0.0 <= out.min() and out.max() <= 1.0
+
+
+def test_soft_clip_keeps_midtones_and_highlight_detail():
+    x = np.linspace(-0.3, 1.3, 1601, dtype=np.float32)
+    y = P.soft_clip(x)
+    mid = (x > 0.15) & (x < 0.85)
+    np.testing.assert_allclose(y[mid], x[mid], atol=1e-6)
+    assert np.all(np.diff(y) >= 0)          # Reihenfolge der Helligkeiten bleibt
+    assert y.max() < 1.0 and y.min() > 0.0  # kein hartes Abschneiden

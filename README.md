@@ -27,7 +27,7 @@ Live-Vorschau und Voreinstellungen zum schnellen Ausprobieren.
 |---|---|---|
 | Kontrast | **Histogramm strecken**, Schwarz/Weiß abschneiden | Spreizt flaue Grauwerte auf den vollen Bereich |
 | | Puffer (Detailschutz) | Streckt weniger hart, damit in sehr hellen und dunklen Bereichen nichts verloren geht |
-| | Werte nur aus der Bildmitte messen | Rahmen, Messmarken und Beschriftung verfälschen die Streckung nicht |
+| | Bildrand nicht mitmessen | Scanrahmen, Messmarken und Beschriftung verfälschen die Streckung nicht |
 | | **Kontrastausgleich je Bildbereich** | CLAHE bzw. „Multidodging“: holt Details aus flauen und dunklen Partien |
 | | Mitteltöne, Lokaler Kontrast | Feinabstimmung |
 | Schärfen | Stärke, Radius, Schwelle | Unscharf maskieren. Die Schwelle verhindert, dass Filmkorn mitgeschärft wird |
@@ -36,11 +36,12 @@ Live-Vorschau und Voreinstellungen zum schnellen Ausprobieren.
 | | Ausleuchtung ausgleichen | Gleicht dunkle Ränder und Vignettierung aus |
 | | Negativ umkehren | Für gescannte Negative |
 
-**Voreinstellungen:** Original, Standard Luftbild, Flau/kontrastarm, Ungleich belichtet,
-Details/Auswertung, Grobkörnig, Staub & Kratzer, Zu dunkel, Zu hell, GIS/DGM sicher und Negativ.
-„GIS/DGM sicher“ entspricht dem Gemini-Skript: Statistik aus der Bildmitte, 0,5/99,5 %,
-10 % Puffer und Schärfen mit Sigma 1 und Stärke 50 %. Eigene Voreinstellungen lassen sich mit
-„Aktuelle speichern…“ anlegen.
+**Voreinstellungen:** Original, Standard Luftbild, Flau/kontrastarm, Bombentrichter/Details,
+Ungleich belichtet, Dunkler Wald aufhellen, Helle Flächen betonen, Grobkörnig, Staub & Kratzer,
+GIS/DGM sicher und Negativ. Abgestimmt wurden sie an echten Weltkriegs-Luftbildern: Helle
+Trichter und dunkler Wald behalten Zeichnung, weil Lichter und Schatten weich begrenzt statt
+hart abgeschnitten werden. „GIS/DGM sicher“ entspricht dem Gemini-Skript. Eigene
+Voreinstellungen lassen sich mit „Aktuelle speichern…“ anlegen.
 
 **Georeferenzierung:** GeoTIFF-Koordinaten, Koordinatensystem sowie World-Files (.tfw/.jgw/.pgw)
 und .prj bleiben beim Speichern erhalten. Zuschnitt und Drehung werden dabei korrekt
