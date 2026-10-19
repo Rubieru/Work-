@@ -21,10 +21,12 @@ class BatchJob:
     fmt: str
     suffix: str
     use_geometry: bool
+    auto: bool = False   # Regler je Bild automatisch bestimmen
 
 
 class BatchDialog(QDialog):
-    def __init__(self, parent, source_name: str, files: list[str], start_dir: str):
+    def __init__(self, parent, source_name: str, files: list[str], start_dir: str,
+                 auto: bool = False):
         super().__init__(parent)
         self.setWindowTitle("Stapelverarbeitung")
         self.resize(640, 560)
@@ -53,6 +55,13 @@ class BatchDialog(QDialog):
         lay.addLayout(row)
 
         form = QFormLayout()
+        self.chk_auto = QCheckBox("Regler für jedes Bild automatisch anpassen")
+        self.chk_auto.setToolTip(
+            "Empfohlen, wenn die Bilder unterschiedlich sind (Stadt, Wald, Wiesen, Wasser, "
+            "hell oder dunkel): jedes Bild wird einzeln gemessen und eingestellt. "
+            "Sonst werden die Regler des aktuellen Bildes genau übernommen.")
+        self.chk_auto.setChecked(auto)
+        form.addRow(self.chk_auto)
         self.chk_geo = QCheckBox("Zuschnitt und Drehung ebenfalls übernehmen")
         self.chk_geo.setToolTip(
             "Sinnvoll, wenn alle Scans gleich groß sind und denselben Rand haben. "
@@ -130,7 +139,8 @@ class BatchDialog(QDialog):
         files = [self.list.item(i).data(Qt.UserRole) for i in range(self.list.count())
                  if self.list.item(i).checkState() == Qt.Checked]
         return BatchJob(files, self.folder.text().strip(), self.fmt.currentData(),
-                        self.suffix.text(), self.chk_geo.isChecked())
+                        self.suffix.text(), self.chk_geo.isChecked(),
+                        self.chk_auto.isChecked())
 
 
 def run_batch(job: BatchJob, settings: P.Settings, progress=None, cancelled=None,
@@ -150,7 +160,11 @@ def run_batch(job: BatchJob, settings: P.Settings, progress=None, cancelled=None
             out = os.path.join(job.folder, stem + job.suffix + ext)
             if os.path.abspath(out) == os.path.abspath(src):
                 out = os.path.join(job.folder, stem + job.suffix + "_1" + ext)
-            P.export(doc, s, out, job.fmt, nodata_safe=nodata_safe)
+            s_img = s
+            if job.auto:
+                geo = P.Settings(rotation=s.rotation, crop=s.crop)
+                s_img = P.with_tonal(s, P.auto_tonal(doc.prepare(geo)))
+            P.export(doc, s_img, out, job.fmt, nodata_safe=nodata_safe)
             written.append(out)
         except Exception as exc:  # ein defektes Bild soll den Stapel nicht abbrechen
             errors.append((src, f"{type(exc).__name__}: {exc}"))

@@ -1,4 +1,4 @@
-# Luftbild-Editor
+# Luftbild-Editor PZU
 
 Ein einfaches Windows-Programm zum Bearbeiten **historischer Luftbilder** (Schwarz-Weiß / Graustufen):
 pixelgenau zuschneiden, Kontrast per **Histogrammstreckung** verbessern und **schärfen**, mit
@@ -36,12 +36,17 @@ Live-Vorschau und Voreinstellungen zum schnellen Ausprobieren.
 | | Ausleuchtung ausgleichen | Gleicht dunkle Ränder und Vignettierung aus |
 | | Negativ umkehren | Für gescannte Negative |
 
-**Voreinstellungen:** Original, Standard Luftbild, Flau/kontrastarm, Bombentrichter/Details,
-Ungleich belichtet, Dunkler Wald aufhellen, Helle Flächen betonen, Grobkörnig, Staub & Kratzer,
-GIS/DGM sicher und Negativ. Abgestimmt wurden sie an echten Weltkriegs-Luftbildern: Helle
-Trichter und dunkler Wald behalten Zeichnung, weil Lichter und Schatten weich begrenzt statt
-hart abgeschnitten werden. „GIS/DGM sicher“ entspricht dem Gemini-Skript. Eigene
-Voreinstellungen lassen sich mit „Aktuelle speichern…“ anlegen.
+**Voreinstellungen:**
+- **Automatisch (empfohlen):** misst Helligkeit, Kontrast und Filmkorn jedes Bildes und stellt
+  die Regler passend ein, egal ob Stadt, Wald, Wiesen oder Wasser. Das funktioniert auch in der
+  Stapelverarbeitung je Bild.
+- **Nach Bildinhalt:** Stadt/Bebauung, Wald, Wiesen & Felder, Wasser/Fluss.
+- **Nach Bildproblem:** Flau/kontrastarm, Details/Auswertung (Bombentrichter, Gräben), Zu dunkel,
+  Zu hell, Ungleich belichtet, Grobkörnig, Staub & Kratzer.
+- **Sonstige:** Standard, GIS/DGM sicher (wie das Gemini-Skript), Negativ.
+
+Abgestimmt wurden sie an echten Weltkriegs-Luftbildern: Helle Flächen und dunkle Partien behalten
+Zeichnung, weil Lichter und Schatten weich begrenzt statt hart abgeschnitten werden.
 
 **Georeferenzierung:** GeoTIFF-Koordinaten, Koordinatensystem sowie World-Files (.tfw/.jgw/.pgw)
 und .prj bleiben beim Speichern erhalten. Zuschnitt und Drehung werden dabei korrekt
@@ -58,12 +63,14 @@ mit Strg+Z und Strg+Y.
 Große Scans werden für die Vorschau verkleinert berechnet. Beim Hineinzoomen und beim Speichern
 rechnet das Programm in voller Auflösung, und zwar so, dass Vorschau und Ergebnis übereinstimmen.
 
-**Fehlerprotokoll:** `%APPDATA%\Luftbild-Editor\protokoll.txt`
+**Fehlerprotokoll:** `%APPDATA%\Luftbild-Editor\protokoll.txt`, erreichbar über *Hilfe → Protokoll-Ordner öffnen*.
+
+**Logo und Farben:** Name, Farben und Logo stehen in `luftbild_editor/theme.py`. Das Logo liegt als `luftbild_editor/resources/logo.png`, daraus entsteht beim Bauen auch das Symbol der .exe.
 
 ## Installation unter Windows
 
 **Variante A: fertige .exe.** Unter *GitHub → Actions → „Windows-Programm bauen“* das Artefakt
-`Luftbild-Editor-Windows` herunterladen, entpacken und `Luftbild-Editor.exe` starten. Python wird
+`Luftbild-Editor-PZU-Windows` herunterladen, entpacken und `Luftbild-Editor PZU.exe` starten. Python wird
 nicht benötigt.
 
 **Variante B: mit Python.** Python 3.10 oder neuer von python.org installieren, dann `start.bat`

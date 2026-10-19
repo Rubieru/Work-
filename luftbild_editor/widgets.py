@@ -8,7 +8,9 @@ from PySide6.QtWidgets import (QDoubleSpinBox, QGraphicsPixmapItem, QGraphicsSce
                                QGraphicsView, QHBoxLayout, QLabel, QSlider, QVBoxLayout,
                                QWidget)
 
-ACCENT = QColor(255, 196, 0)
+from . import theme
+
+ACCENT = QColor(theme.ACCENT)
 
 
 class LabeledSlider(QWidget):
@@ -109,7 +111,7 @@ class HistogramWidget(QWidget):
         p.setPen(QColor(70, 70, 70))
         p.drawRect(r)
         for data, color in ((self._before, QColor(150, 150, 150, 110)),
-                            (self._after, QColor(255, 196, 0, 150))):
+                            (self._after, QColor(ACCENT.red(), ACCENT.green(), ACCENT.blue(), 150))):
             if data is None or data.max() <= 0:
                 continue
             d = np.sqrt(data / data.max())  # Wurzel: kleine Werte sichtbar
@@ -145,7 +147,7 @@ class ImageView(QGraphicsView):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setScene(QGraphicsScene(self))
-        self.setBackgroundBrush(QColor(45, 45, 45))
+        self.setBackgroundBrush(QColor(theme.VIEW_BACKGROUND))
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
         self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)

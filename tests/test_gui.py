@@ -57,7 +57,7 @@ def test_full_workflow(app, tmp_path, monkeypatch):
     win.tabs.setCurrentIndex(1)
     wait(app)
     item = next(win.preset_list.item(i) for i in range(win.preset_list.count())
-                if win.preset_list.item(i).text() == "Bombentrichter / Details")
+                if win.preset_list.item(i).text() == "Details / Auswertung")
     win._apply_preset_item(item)
     wait(app)
     assert win.entry.settings.stretch and win.entry.settings.sharpen_amount > 0
@@ -112,13 +112,15 @@ def test_batch(tmp_path):
         P.save_image(str(p), P.to_uint(synthetic_aerial(400 + 10 * i, 300, seed=i), 8), "tif8")
         files.append(str(p))
     files.append(str(tmp_path / "fehlt.tif"))
-    s = P.with_tonal(P.Settings(crop=(10, 10, 200, 150)), BUILTIN_PRESETS["Standard Luftbild"])
+    s = P.with_tonal(P.Settings(crop=(10, 10, 200, 150)), BUILTIN_PRESETS["Standard (ausgewogen)"])
     out = tmp_path / "aus"
     written, errors = run_batch(BatchJob(files, str(out), "png", "_b", False), s)
     assert len(written) == 3 and len(errors) == 1
     assert P.load_image(written[0]).data.shape == (300, 400)  # ohne Zuschnitt
     written, _ = run_batch(BatchJob(files[:1], str(out), "png", "_z", True), s)
     assert P.load_image(written[0]).data.shape == (150, 200)  # mit Zuschnitt
+    written, errors = run_batch(BatchJob(files[:2], str(out), "png", "_a", False, auto=True), s)
+    assert len(written) == 2 and not errors
 
 
 def test_simple_mode_sliders(app, tmp_path, monkeypatch):

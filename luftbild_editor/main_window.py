@@ -9,8 +9,9 @@ from dataclasses import dataclass, field, replace
 import cv2
 import numpy as np
 from PySide6.QtCore import (QEvent, QObject, QRunnable, QSettings, QSize, QStandardPaths, Qt,
+                            QUrl,
                             QThreadPool, QTimer, Signal)
-from PySide6.QtGui import QAction, QIcon, QImage, QKeySequence, QPixmap
+from PySide6.QtGui import QAction, QDesktopServices, QIcon, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QButtonGroup, QCheckBox,
                                QComboBox,
                                QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
@@ -20,8 +21,10 @@ from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QButtonGroup, QCh
                                QStackedWidget, QTabWidget, QToolButton, QVBoxLayout,
                                QWidget)
 
+from . import __version__
 from . import processing as P
-from .presets import BUILTIN_PRESETS, load_user_presets, save_user_presets
+from . import theme
+from .presets import AUTO, BUILTIN_PRESETS, load_user_presets, save_user_presets
 from .widgets import HistogramWidget, ImageView, LabeledSlider
 
 PREVIEW_LONG_SIDE = 2000
@@ -29,7 +32,8 @@ CROP_DISPLAY_LONG_SIDE = 4096
 log = logging.getLogger("luftbild_editor")
 LOG_FILE = ""
 THUMB_LONG_SIDE = 128
-MODE_STYLE = ("QPushButton:checked { background: #ffc400; color: #111; font-weight: bold; }")
+MODE_STYLE = (f"QPushButton:checked {{ background: {theme.ACCENT}; color: {theme.ACCENT_TEXT}; "
+              "font-weight: bold; }")
 IMAGE_FILTER = "Bilder (*.tif *.tiff *.png *.jpg *.jpeg *.bmp *.jp2);;Alle Dateien (*)"
 
 
@@ -71,7 +75,7 @@ class _Job(QRunnable):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Luftbild-Editor")
+        self.setWindowTitle(theme.APP_NAME)
         self.resize(1500, 950)
         self.setAcceptDrops(True)
 
@@ -89,6 +93,8 @@ class MainWindow(QMainWindow):
         self._last_geometry = None
         self._progress = None
         self._errors_shown = set()
+        self._auto_cache = None
+        self._last_preset_auto = False
 
         self.pool = QThreadPool.globalInstance()
         self.sig = _Signals()
@@ -124,6 +130,14 @@ class MainWindow(QMainWindow):
         left = QWidget()
         ll = QVBoxLayout(left)
         ll.setContentsMargins(6, 6, 6, 6)
+        if theme.logo_path():
+            logo = QLabel()
+            pm = QPixmap(theme.logo_path())
+            logo.setPixmap(pm.scaledToHeight(min(pm.height(), 56), Qt.SmoothTransformation))
+            logo.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            logo.setToolTip(theme.APP_NAME)
+            ll.addWidget(logo)
+            ll.addSpacing(6)
         ll.addWidget(self._heading("Bilder"))
         self.image_list = QListWidget()
         self.image_list.setMaximumHeight(170)
@@ -142,7 +156,7 @@ class MainWindow(QMainWindow):
         self.preset_list = QListWidget()
         self.preset_list.setViewMode(QListWidget.IconMode)
         self.preset_list.setIconSize(QSize(THUMB_LONG_SIDE, THUMB_LONG_SIDE * 3 // 4))
-        self.preset_list.setGridSize(QSize(THUMB_LONG_SIDE + 12, THUMB_LONG_SIDE * 3 // 4 + 30))
+        self.preset_list.setGridSize(QSize(THUMB_LONG_SIDE + 12, THUMB_LONG_SIDE * 3 // 4 + 44))
         self.preset_list.setResizeMode(QListWidget.Adjust)
         self.preset_list.setMovement(QListWidget.Static)
         self.preset_list.setWordWrap(True)
@@ -182,7 +196,8 @@ class MainWindow(QMainWindow):
         self.btn_export = QPushButton("3  Bild speichern…")
         self.btn_export.setMinimumHeight(40)
         self.btn_export.setStyleSheet(
-            "QPushButton { background: #ffc400; color: #111; font-weight: bold; border-radius: 4px; }"
+            f"QPushButton {{ background: {theme.ACCENT}; color: {theme.ACCENT_TEXT}; "
+            "font-weight: bold; border-radius: 4px; }"
             "QPushButton:disabled { background: #555; color: #888; }")
         self.btn_export.clicked.connect(self.export_current)
         rl.addWidget(self.btn_export)
@@ -438,6 +453,17 @@ class MainWindow(QMainWindow):
         m_file = self.menuBar().addMenu("&Datei")
         m_edit = self.menuBar().addMenu("&Bearbeiten")
         m_view = self.menuBar().addMenu("&Ansicht")
+        m_help = self.menuBar().addMenu("&Hilfe")
+        a_log = QAction("Protokoll-Ordner öffnen", self)
+        a_log.triggered.connect(lambda: QDesktopServices.openUrl(
+            QUrl.fromLocalFile(os.path.dirname(LOG_FILE) if LOG_FILE else theme.log_dir())))
+        m_help.addAction(a_log)
+        a_about = QAction(f"Über {theme.APP_NAME}", self)
+        a_about.triggered.connect(lambda: QMessageBox.about(
+            self, theme.APP_NAME,
+            f"<b>{theme.APP_NAME}</b><br>Version {__version__}<br><br>"
+            "Zuschneiden, Kontrast und Schärfe für historische Luftbilder."))
+        m_help.addAction(a_about)
 
         def act(text, slot, shortcut=None, menu=None, toolbar=False):
             a = QAction(text, self)
@@ -513,6 +539,7 @@ class MainWindow(QMainWindow):
             return
         self.entry = self.entries[row]
         self.doc = None
+        self._auto_cache = None
         self._crop_qimage = None
         self._last_geometry = None
         self.view.clear()
@@ -741,15 +768,20 @@ class MainWindow(QMainWindow):
             geo = P.Settings(rotation=base.rotation, crop=base.crop)
             prep = doc.prepare(geo)
             scale = min(1.0, THUMB_LONG_SIDE / prep.long_side)
+            auto = P.auto_tonal(prep)
             out = {}
             for name, values in presets.items():
+                if name == AUTO:
+                    values = auto
                 s = P.with_tonal(geo, values)
                 out[name] = gray_qimage(P.to_uint(P.render(prep, s, None, scale), 8))
-            return out
+            return dict(thumbs=out, auto=auto, geometry=(geo.rotation, geo.crop))
 
         self._submit("thumbs", job)
 
-    def _done_thumbs(self, thumbs):
+    def _done_thumbs(self, res):
+        thumbs = res["thumbs"]
+        self._auto_cache = (res["geometry"], res["auto"])
         for i in range(self.preset_list.count()):
             item = self.preset_list.item(i)
             q = thumbs.get(item.data(Qt.UserRole))
@@ -1013,10 +1045,35 @@ class MainWindow(QMainWindow):
             item.setSizeHint(self.preset_list.gridSize())
             if name in self.user_presets:
                 item.setToolTip("Eigene Voreinstellung")
+            elif name == AUTO:
+                item.setToolTip("Misst Helligkeit, Kontrast und Filmkorn dieses Bildes und "
+                                "stellt die Regler passend ein – egal ob Stadt, Wald, "
+                                "Wiesen oder Wasser.")
             self.preset_list.addItem(item)
 
+    def _auto_values(self) -> dict:
+        """Automatische Werte für das aktuelle Bild (aus dem Zwischenspeicher)."""
+        s = self.entry.settings
+        geometry = (s.rotation, s.crop)
+        if self._auto_cache and self._auto_cache[0] == geometry:
+            return self._auto_cache[1]
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            prep = self.doc.prepare(P.Settings(rotation=s.rotation, crop=s.crop))
+            values = P.auto_tonal(prep)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._auto_cache = (geometry, values)
+        return values
+
     def _apply_preset_item(self, item):
-        values = self._all_presets().get(item.data(Qt.UserRole))
+        name = item.data(Qt.UserRole)
+        if name == AUTO and self.doc:
+            values = self._auto_values()
+            self._last_preset_auto = True
+        else:
+            values = self._all_presets().get(name)
+            self._last_preset_auto = False
         if values is not None and self.entry:
             self._apply_tonal(values)
             if self.tabs.currentIndex() != 1:
@@ -1098,7 +1155,7 @@ class MainWindow(QMainWindow):
         from .batch import BatchDialog, run_batch
         others = [e.path for e in self.entries if e is not self.entry]
         dlg = BatchDialog(self, os.path.basename(self.entry.path), others,
-                          os.path.dirname(self.entry.path))
+                          os.path.dirname(self.entry.path), auto=self._last_preset_auto)
         if dlg.exec() != BatchDialog.Accepted:
             return
         job = dlg.job()

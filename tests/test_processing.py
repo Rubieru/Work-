@@ -67,7 +67,7 @@ def test_preview_approximates_full_resolution():
 
 def test_region_render_shape():
     doc = make_doc()
-    s = P.with_tonal(P.Settings(), BUILTIN_PRESETS["Bombentrichter / Details"])
+    s = P.with_tonal(P.Settings(), BUILTIN_PRESETS["Details / Auswertung"])
     out = P.render(doc.prepare(s), s, (100, 50, 200, 120), 0.5)
     assert out.shape == (60, 100)
 
@@ -80,7 +80,7 @@ def test_rotation_keeps_canvas():
 
 def test_save_and_load_roundtrip(tmp_path):
     doc = make_doc()
-    s = P.with_tonal(P.Settings(crop=(0, 0, 300, 200)), BUILTIN_PRESETS["Standard Luftbild"])
+    s = P.with_tonal(P.Settings(crop=(0, 0, 300, 200)), BUILTIN_PRESETS["Standard (ausgewogen)"])
     for fmt, (_, ext) in P.EXPORT_FORMATS.items():
         path = str(tmp_path / f"Luftbild_ä_{fmt}{ext}")
         P.export(doc, s, path, fmt)
@@ -125,3 +125,26 @@ def test_soft_clip_keeps_midtones_and_highlight_detail():
     np.testing.assert_allclose(y[mid], x[mid], atol=1e-6)
     assert np.all(np.diff(y) >= 0)          # Reihenfolge der Helligkeiten bleibt
     assert y.max() < 1.0 and y.min() > 0.0  # kein hartes Abschneiden
+
+
+def test_auto_adapts_to_dark_and_flat_scans():
+    from tests.sample import synthetic_aerial
+    base = synthetic_aerial(800, 600)[60:-60, 60:-60]  # ohne Scanrahmen
+    variants = {"normal": base, "dunkel": base * 0.4, "flau_hell": 0.55 + base * 0.3}
+    means = {}
+    for name, img in variants.items():
+        doc = P.Document(P.LoadedImage(np.clip(img, 0, 1).astype(np.float32), 16, None))
+        prep = doc.prepare(P.Settings())
+        values = P.auto_tonal(prep)
+        out = P.render(prep, P.with_tonal(P.Settings(), values))
+        means[name] = float(out.mean())
+        assert np.mean(out > 0.99) < 0.01 and np.mean(out < 0.01) < 0.01
+    assert max(means.values()) - min(means.values()) < 0.08
+
+
+def test_auto_preset_values():
+    from luftbild_editor.presets import AUTO, preset_values
+    doc = make_doc()
+    assert preset_values(AUTO) is None
+    v = preset_values(AUTO, doc.prepare(P.Settings()))
+    assert v["stretch"] and 0.15 <= v["equalize"] <= 0.7

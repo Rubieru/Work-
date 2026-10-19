@@ -32,13 +32,20 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt pyinstaller
-      - run: pyinstaller --noconfirm --windowed --name Luftbild-Editor --collect-submodules imagecodecs run_editor.py
+      - run: pip install -r requirements.txt pyinstaller pillow
+      - run: python tools/make_icon.py
+      - name: .exe bauen
+        shell: pwsh
+        run: |
+          $icon = @()
+          if (Test-Path luftbild_editor/resources/logo.ico) { $icon = @("--icon", "luftbild_editor/resources/logo.ico") }
+          pyinstaller --noconfirm --windowed --name "Luftbild-Editor PZU" --collect-submodules imagecodecs `
+            --add-data "luftbild_editor/resources:luftbild_editor/resources" @icon run_editor.py
       - name: Selbsttest der .exe mit großem Scan (10701 x 10137 px)
         shell: pwsh
         run: |
           python -c "from tests.sample import write_big_sample; write_big_sample('probe.tif')"
-          $p = Start-Process -FilePath "dist\Luftbild-Editor\Luftbild-Editor.exe" `
+          $p = Start-Process -FilePath "dist\Luftbild-Editor PZU\Luftbild-Editor PZU.exe" `
                -ArgumentList '--selbsttest', "$PWD\probe.tif", "$PWD\bericht.txt" -Wait -PassThru
           if (Test-Path bericht.txt) { Get-Content bericht.txt } else { Write-Host "Kein Bericht erzeugt" }
           $log = Join-Path $env:APPDATA "Luftbild-Editor\protokoll.txt"
@@ -51,5 +58,5 @@ jobs:
           path: selbsttest_*.png
       - uses: actions/upload-artifact@v4
         with:
-          name: Luftbild-Editor-Windows
-          path: dist/Luftbild-Editor
+          name: Luftbild-Editor-PZU-Windows
+          path: dist/Luftbild-Editor PZU

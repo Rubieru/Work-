@@ -1,0 +1,3 @@
+Hier das Firmenlogo als logo.png ablegen (am besten quadratisch oder breit,
+transparenter Hintergrund, mindestens 256 px hoch). Es erscheint dann im
+Programmfenster, in der Taskleiste und als Symbol der .exe.

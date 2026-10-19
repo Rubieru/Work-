@@ -6,23 +6,24 @@ import sys
 import time
 
 from PySide6.QtCore import QStandardPaths
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtGui import QColor, QIcon, QPalette
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from . import __version__
 from . import main_window as mw
+from . import theme
 
 
 def dark_palette() -> QPalette:
     p = QPalette()
-    base, window, text = QColor(38, 38, 38), QColor(53, 53, 53), QColor(225, 225, 225)
+    base, window, text = QColor(theme.BASE), QColor(theme.WINDOW), QColor(theme.TEXT)
     for role, color in ((QPalette.Window, window), (QPalette.WindowText, text),
                         (QPalette.Base, base), (QPalette.AlternateBase, window),
                         (QPalette.ToolTipBase, QColor(25, 25, 25)),
                         (QPalette.ToolTipText, text), (QPalette.Text, text),
                         (QPalette.Button, window), (QPalette.ButtonText, text),
-                        (QPalette.Highlight, QColor(255, 196, 0)),
-                        (QPalette.HighlightedText, QColor(20, 20, 20)),
+                        (QPalette.Highlight, QColor(theme.ACCENT)),
+                        (QPalette.HighlightedText, QColor(theme.ACCENT_TEXT)),
                         (QPalette.PlaceholderText, QColor(130, 130, 130))):
         p.setColor(role, color)
     for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
@@ -32,8 +33,7 @@ def dark_palette() -> QPalette:
 
 def setup_logging() -> str:
     """Protokoll nach %APPDATA%\\Luftbild-Editor\\protokoll.txt (auch ohne Konsole)."""
-    folder = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation) \
-        or os.path.expanduser("~/.luftbild-editor")
+    folder = theme.log_dir()
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, "protokoll.txt")
     try:  # Datei klein halten
@@ -142,8 +142,12 @@ def self_test(win, app, image, report) -> int:
 def main(argv=None) -> int:
     argv = list(sys.argv if argv is None else argv)
     app = QApplication(argv)
+    # Name für Einstellungen/Protokoll bleibt gleich, angezeigt wird APP_NAME
     app.setApplicationName("Luftbild-Editor")
     app.setOrganizationName("Luftbild-Editor")
+    app.setApplicationDisplayName(theme.APP_NAME)
+    if theme.logo_path():
+        app.setWindowIcon(QIcon(theme.logo_path()))
     app.setStyle("Fusion")
     app.setPalette(dark_palette())
     log_path = setup_logging()

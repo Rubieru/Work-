@@ -528,6 +528,63 @@ def _apply_clahe(img, tables, strength, base_w, base_h, x0, y0, scale):
     return img + strength * (eq.astype(np.float32) - img)
 
 
+def auto_tonal(prep: Prepared) -> dict:
+    """Misst das Bild und schlägt passende Regler-Werte vor ("Automatisch").
+
+    Funktioniert unabhängig vom Inhalt (Stadt, Wald, Wiesen, Wasser …):
+    - Helligkeit: Mitteltöne so, dass der Median etwa mittelgrau wird
+    - Kontrastausgleich: umso stärker, je flauer das Bild lokal ist
+    - Filmkorn: aus einem Ausschnitt in voller Auflösung geschätzt; danach richten
+      sich Körnungsfilter und Schärfe-Schwelle
+    """
+    base = Settings(stretch=True, clip_black=0.2, clip_white=0.1, stats_center=True)
+    lo, hi = compute_levels(prep, base)
+    st = prep.stats
+    h, w = st.shape
+    my, mx = max(1, h // 25), max(1, w // 25)
+    core = st[my:h - my, mx:w - mx]
+    valid = core[core > 3.0 / 255.0]
+    if valid.size < 100:
+        valid = core.ravel()
+    x = np.clip((valid - lo) / max(hi - lo, 1e-4), 0, 1)
+
+    # Helligkeit: Median sanft Richtung Mittelgrau ziehen. Helle Bilder (Flugfelder,
+    # Wiesen) nur wenig abdunkeln, dunkle (Wald, Schatten) stärker aufhellen.
+    med = float(np.clip(np.median(x), 0.05, 0.95))
+    gamma = np.log(0.5) / np.log(med)
+    midtones = -np.log(gamma) / np.log(3.0)
+    midtones = float(np.clip(midtones * (0.4 if midtones < 0 else 0.7), -0.15, 0.45))
+
+    # Lokaler Kontrast (Abweichung vom Umfeld, ~1 % der Bildgröße)
+    stretched = np.clip((core - lo) / max(hi - lo, 1e-4), 0, 1).astype(np.float32)
+    sigma = max(2.0, 0.01 * max(core.shape))
+    local = float(np.mean(np.abs(stretched - cv2.GaussianBlur(stretched, (0, 0), sigma))))
+    equalize = float(np.clip(0.75 - local * 6.0, 0.15, 0.7))
+
+    # Filmkorn: robuste Streuung gegenüber dem Median in einem Vollauflösungs-Ausschnitt
+    H, W = prep.base.shape
+    t = min(1024, H, W)
+    y0, x0 = (H - t) // 2, (W - t) // 2
+    tile = as_float(prep.base[y0:y0 + t, x0:x0 + t]).astype(np.float32)
+    tile = np.clip((tile - lo) / max(hi - lo, 1e-4), 0, 1).astype(np.float32)
+    noise = float(1.4826 * np.median(np.abs(tile - cv2.medianBlur(tile, 3))))
+
+    if noise > 0.03:
+        denoise, thr, amount, radius = 0.5, 0.025, 0.5, 1.4
+    elif noise > 0.015:
+        denoise, thr, amount, radius = 0.25, 0.015, 0.6, 1.2
+    else:
+        denoise, thr, amount, radius = 0.0, 0.008, 0.75, 1.0
+    if equalize > 0.5:  # viel Ausgleich verstärkt auch Korn
+        thr = max(thr, 0.012)
+    return {
+        "stretch": True, "clip_black": 0.2, "clip_white": 0.1, "stats_center": True,
+        "stretch_buffer": 0.02, "midtones": round(midtones, 2),
+        "equalize": round(equalize, 2), "denoise": denoise,
+        "sharpen_amount": amount, "sharpen_radius": radius, "sharpen_threshold": thr,
+    }
+
+
 def filter_margin(prep: Prepared, s: Settings) -> int:
     """Benötigter Rand (Originalpixel), damit Kacheln nahtlos sind.
 
