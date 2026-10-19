@@ -10,13 +10,17 @@ Export in voller Auflösung gleich aus.
 """
 from __future__ import annotations
 
+import logging
 import math
 import os
 import threading
+import time
 from dataclasses import asdict, dataclass, fields, replace
 
 import cv2
 import numpy as np
+
+log = logging.getLogger("luftbild_editor")
 
 from .geo import geotiff_tags, output_affine, read_geo, write_sidecars
 
@@ -157,12 +161,30 @@ def as_float(arr: np.ndarray) -> np.ndarray:
 
 
 def load_image(path: str) -> LoadedImage:
+    t0 = time.perf_counter()
     ext = os.path.splitext(path)[1].lower()
+    try:
+        size_mb = os.path.getsize(path) / 1e6
+    except OSError:
+        size_mb = -1
     if tifffile is not None and ext in (".tif", ".tiff"):
         try:
             with tifffile.TiffFile(path) as tf:
                 page = tf.pages[0]
-                arr = page.asarray()
+                info = (f"TIFF {page.shape} {page.dtype}, Komprimierung "
+                        f"{getattr(page.compression, 'name', page.compression)}, "
+                        f"{'Kacheln' if page.is_tiled else 'Streifen'}: "
+                        f"{len(page.dataoffsets)}, Photometric "
+                        f"{getattr(page.photometric, 'name', page.photometric)}, "
+                        f"{len(tf.pages)} Seite(n), {size_mb:.0f} MB")
+                log.info("Lese %s – %s", path, info)
+                # alle Prozessorkerne zum Entpacken nutzen
+                arr = page.asarray(maxworkers=os.cpu_count() or 4)
+                t1 = time.perf_counter()
+                if int(page.photometric) == 3 and page.colormap is not None:
+                    # Palettenbild: Farbtabelle anwenden, dann Graustufen
+                    cmap = np.asarray(page.colormap)
+                    arr = (cmap[:, arr].transpose(1, 2, 0) >> 8).astype(np.uint8)
                 dpi = None
                 try:
                     xr = page.tags.get("XResolution")
@@ -183,15 +205,23 @@ def load_image(path: str) -> LoadedImage:
             data, bits = _to_gray(arr, rgb_order=True)
             if photometric == 0:  # MINISWHITE: 0 = weiß
                 data = (_norm_of(data) - data).astype(data.dtype)
-            return LoadedImage(np.ascontiguousarray(data), bits, dpi, geo)
+            data = np.ascontiguousarray(data)
+            log.info("Gelesen in %.1f s (Entpacken %.1f s, Umwandeln %.1f s)",
+                     time.perf_counter() - t0, t1 - t0, time.perf_counter() - t1)
+            return LoadedImage(data, bits, dpi, geo)
         except Exception:
-            pass  # Fallback auf OpenCV
+            log.exception("tifffile konnte %s nicht lesen – versuche OpenCV", path)
     # np.fromfile + imdecode funktioniert auch mit Umlauten im Pfad (Windows)
     buf = np.fromfile(path, dtype=np.uint8)
+    t1 = time.perf_counter()
     arr = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED | cv2.IMREAD_ANYDEPTH)
     if arr is None:
         raise ValueError(f"Bild konnte nicht gelesen werden: {path}")
+    t2 = time.perf_counter()
     data, bits = _to_gray(arr, rgb_order=False)
+    log.info("Gelesen mit OpenCV (%s, %.0f MB, %s %s): Datei %.1f s, Entpacken %.1f s, "
+             "Umwandeln %.1f s", ext, size_mb, arr.shape, arr.dtype, t1 - t0, t2 - t1,
+             time.perf_counter() - t2)
     return LoadedImage(np.ascontiguousarray(data), bits, None, read_geo(path))
 
 

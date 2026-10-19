@@ -112,6 +112,9 @@ class MainWindow(QMainWindow):
         self._t_detail = self._timer(90, self._render_detail)
         self._t_history = self._timer(600, self._commit_history)
         self._t_thumbs = self._timer(400, self._render_thumbs)
+        self._t_loading = QTimer(self)
+        self._t_loading.setInterval(1000)
+        self._t_loading.timeout.connect(self._tick_loading)
         self.view.viewChanged.connect(self._on_view_changed)
 
         QApplication.instance().installEventFilter(self)
@@ -544,7 +547,10 @@ class MainWindow(QMainWindow):
         self._last_geometry = None
         self.view.clear()
         self.center.setCurrentIndex(1)
-        self.statusBar().showMessage(f"Lade {os.path.basename(self.entry.path)} …")
+        self._load_started = time.time()
+        self._load_name = os.path.basename(self.entry.path)
+        self._t_loading.start()
+        self._tick_loading()
         QApplication.setOverrideCursor(Qt.WaitCursor)
         path = self.entry.path
 
@@ -589,6 +595,7 @@ class MainWindow(QMainWindow):
             if base in self._busy:
                 self._busy[base] = False
             if base in ("load", "export", "batch"):
+                self._t_loading.stop()
                 self._close_progress()
                 self.statusBar().clearMessage()
             self._show_error(base, res)
@@ -616,7 +623,13 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(
                 self, "Fehler", f"{text}\n\nDetails stehen in der Protokolldatei:\n{LOG_FILE}")
 
+    def _tick_loading(self):
+        secs = int(time.time() - self._load_started)
+        self.statusBar().showMessage(f"Lade {self._load_name} … {secs} s")
+
     def _done_load(self, res):
+        self._t_loading.stop()
+        log.info("Bild angezeigt nach %.1f s", time.time() - self._load_started)
         QApplication.restoreOverrideCursor()
         self.doc, self._crop_qimage, self._crop_scale, self._crop_levels = res
         w, h = self.doc.size
@@ -765,6 +778,7 @@ class MainWindow(QMainWindow):
         presets = self._all_presets()
 
         def job():
+            t0 = time.time()
             geo = P.Settings(rotation=base.rotation, crop=base.crop)
             prep = doc.prepare(geo)
             scale = min(1.0, THUMB_LONG_SIDE / prep.long_side)
@@ -775,6 +789,7 @@ class MainWindow(QMainWindow):
                     values = auto
                 s = P.with_tonal(geo, values)
                 out[name] = gray_qimage(P.to_uint(P.render(prep, s, None, scale), 8))
+            log.info("Vorschaukacheln und Automatik in %.1f s", time.time() - t0)
             return dict(thumbs=out, auto=auto, geometry=(geo.rotation, geo.crop))
 
         self._submit("thumbs", job)
