@@ -101,13 +101,17 @@ def settings_from_json(d: dict) -> Settings:
 
 @dataclass
 class LoadedImage:
-    data: np.ndarray   # float32, 0..1, 2D
+    data: np.ndarray   # 2D: uint8, uint16 oder float32 (0..1)
     bits: int          # 8 oder 16 (Herkunft)
     dpi: float | None
     geo: object = None  # geo.Geo, falls georeferenziert
 
 
-def _to_gray_float(arr: np.ndarray, rgb_order: bool) -> tuple[np.ndarray, int]:
+def _to_gray(arr: np.ndarray, rgb_order: bool) -> tuple[np.ndarray, int]:
+    """Graustufen im Originalformat (uint8/uint16) – spart gegenüber float32 3/4 Speicher.
+
+    Andere Formate werden als float32 im Bereich 0..1 geliefert.
+    """
     arr = np.asarray(arr)
     # Mehrseitige TIFFs: erste Seite
     while arr.ndim > 3:
@@ -123,16 +127,31 @@ def _to_gray_float(arr: np.ndarray, rgb_order: bool) -> tuple[np.ndarray, int]:
                 arr = arr.astype(np.float32)
             arr = cv2.cvtColor(np.ascontiguousarray(arr), code)
     if arr.dtype == np.uint8:
-        return arr.astype(np.float32) / 255.0, 8
+        return np.ascontiguousarray(arr), 8
     if arr.dtype == np.uint16:
-        return arr.astype(np.float32) / 65535.0, 16
+        return np.ascontiguousarray(arr), 16
     if arr.dtype == bool:
-        return arr.astype(np.float32), 8
+        return arr.astype(np.uint8) * 255, 8
     arr = arr.astype(np.float32)
-    if np.issubdtype(arr.dtype, np.floating) and arr.max(initial=0) <= 1.0:
-        return np.clip(arr, 0, 1), 16
-    mx = float(arr.max(initial=1)) or 1.0
-    return np.clip(arr / mx, 0, 1).astype(np.float32), 16
+    lo = float(arr.min(initial=0))
+    hi = float(arr.max(initial=1))
+    if lo >= 0 and hi <= 1.0:
+        return np.ascontiguousarray(arr), 16
+    if lo < 0:  # z. B. int16 oder negative NoData-Werte
+        arr = arr - lo
+        hi -= lo
+    return np.clip(arr / (hi or 1.0), 0, 1).astype(np.float32), 16
+
+
+def _norm_of(arr: np.ndarray) -> float:
+    return {np.dtype(np.uint8): 255.0, np.dtype(np.uint16): 65535.0}.get(arr.dtype, 1.0)
+
+
+def as_float(arr: np.ndarray) -> np.ndarray:
+    """Rohdaten -> float32 0..1 (ohne Kopie, wenn bereits float32)."""
+    if arr.dtype == np.float32:
+        return arr
+    return arr.astype(np.float32) * np.float32(1.0 / _norm_of(arr))
 
 
 def load_image(path: str) -> LoadedImage:
@@ -159,9 +178,9 @@ def load_image(path: str) -> LoadedImage:
                     geo = read_geo(path, page)
                 except Exception:
                     geo = None
-            data, bits = _to_gray_float(arr, rgb_order=True)
+            data, bits = _to_gray(arr, rgb_order=True)
             if photometric == 0:  # MINISWHITE: 0 = weiß
-                data = 1.0 - data
+                data = (_norm_of(data) - data).astype(data.dtype)
             return LoadedImage(np.ascontiguousarray(data), bits, dpi, geo)
         except Exception:
             pass  # Fallback auf OpenCV
@@ -170,7 +189,7 @@ def load_image(path: str) -> LoadedImage:
     arr = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED | cv2.IMREAD_ANYDEPTH)
     if arr is None:
         raise ValueError(f"Bild konnte nicht gelesen werden: {path}")
-    data, bits = _to_gray_float(arr, rgb_order=False)
+    data, bits = _to_gray(arr, rgb_order=False)
     return LoadedImage(np.ascontiguousarray(data), bits, None, read_geo(path))
 
 
@@ -293,7 +312,7 @@ class Prepared:
 
 class Document:
     def __init__(self, loaded: LoadedImage, path: str | None = None):
-        self.original = loaded.data
+        self.raw = loaded.data
         self.bits = loaded.bits
         self.dpi = loaded.dpi
         self.geo = loaded.geo
@@ -310,14 +329,19 @@ class Document:
 
     @property
     def size(self) -> tuple[int, int]:
-        h, w = self.original.shape
+        h, w = self.raw.shape
         return w, h
+
+    @property
+    def original(self) -> np.ndarray:
+        """Originalbild als float32 0..1."""
+        return as_float(self.raw)
 
     def rotated(self, angle: float) -> np.ndarray:
         with self._lock:
             key = round(angle, 4)
             if self._rot_key != key:
-                self._rotated = rotate_image(self.original, angle)
+                self._rotated = rotate_image(self.raw, angle)
                 self._rot_key = key
             return self._rotated
 
@@ -330,15 +354,18 @@ class Document:
                 return self._prep
         rot = self.rotated(s.rotation)
         x, y, cw, ch = crop
-        base = np.ascontiguousarray(rot[y:y + ch, x:x + cw])
+        base = rot[y:y + ch, x:x + cw]  # Ansicht ohne Kopie (spart Speicher)
+        mid, mid_scale = _resize_long(base, 2048)
+        mid = as_float(mid)
+        small, small_scale = _resize_long(mid, 512)
+        small_scale *= mid_scale
         levels = []
-        for target in (512, 2048):
-            arr, sc = _resize_long(base, target)
-            if sc < 1.0:
-                levels.append((sc, arr))
+        if small_scale < 1.0:
+            levels.append((small_scale, small))
+        if mid_scale < 1.0:
+            levels.append((mid_scale, mid))
         levels.append((1.0, base))
-        small, small_scale = _resize_long(base, 512)
-        stats, _ = _resize_long(base, 2048)
+        stats = mid
         prep = Prepared(base=base, levels=levels, small=small, small_scale=small_scale,
                         stats=stats, long_side=max(base.shape))
         with self._lock:
@@ -592,7 +619,7 @@ def render(prep: Prepared, s: Settings, region=None, scale: float = 1.0,
     y0l = max(0, int(math.floor((y - pad) * ls)))
     x1l = min(sw, int(math.ceil((x + w + pad) * ls)))
     y1l = min(sh, int(math.ceil((y + h + pad) * ls)))
-    tile = src[y0l:y1l, x0l:x1l]
+    tile = as_float(src[y0l:y1l, x0l:x1l])
 
     f = scale / ls
     if f < 0.999:

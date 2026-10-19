@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass, field, replace
 
+import cv2
 import numpy as np
 from PySide6.QtCore import (QEvent, QObject, QRunnable, QSettings, QSize, QStandardPaths, Qt,
                             QThreadPool, QTimer, Signal)
@@ -23,6 +25,7 @@ from .presets import BUILTIN_PRESETS, load_user_presets, save_user_presets
 from .widgets import HistogramWidget, ImageView, LabeledSlider
 
 PREVIEW_LONG_SIDE = 2000
+CROP_DISPLAY_LONG_SIDE = 4096
 log = logging.getLogger("luftbild_editor")
 LOG_FILE = ""
 THUMB_LONG_SIDE = 128
@@ -76,6 +79,8 @@ class MainWindow(QMainWindow):
         self.entry: ImageEntry | None = None
         self.doc: P.Document | None = None
         self._crop_qimage = None
+        self._crop_scale = 1.0
+        self._crop_levels = (0.0, 1.0)
         self._show_before = False
         self._gen = {"preview": 0, "detail": 0, "thumbs": 0, "load": 0}
         self._busy = {"preview": False, "detail": False}
@@ -517,8 +522,18 @@ class MainWindow(QMainWindow):
         path = self.entry.path
 
         def load():
+            t0 = time.time()
             doc = P.Document.open(path)
-            return doc, gray_qimage(P.display_8bit(doc.original))
+            t1 = time.time()
+            # verkleinerte Ansicht zum Zuschneiden (volle Auflösung erst beim Zoomen)
+            disp, scale = P._resize_long(doc.raw, CROP_DISPLAY_LONG_SIDE)
+            disp = P.as_float(disp)
+            lo, hi = np.percentile(disp[::2, ::2], [0.2, 99.8])
+            levels = (float(lo), float(max(hi, lo + 1e-4)))
+            qimg = gray_qimage(P.to_uint((disp - levels[0]) / (levels[1] - levels[0]), 8))
+            log.info("Geladen %s: %d x %d px, %d Bit, Lesen %.1f s, Ansicht %.1f s",
+                     path, *doc.size, doc.bits, t1 - t0, time.time() - t1)
+            return doc, qimg, scale, levels
 
         self._submit("load", load)
 
@@ -576,7 +591,7 @@ class MainWindow(QMainWindow):
 
     def _done_load(self, res):
         QApplication.restoreOverrideCursor()
-        self.doc, self._crop_qimage = res
+        self.doc, self._crop_qimage, self._crop_scale, self._crop_levels = res
         w, h = self.doc.size
         for sb in self.spin_crop:
             sb.blockSignals(True)
@@ -614,10 +629,15 @@ class MainWindow(QMainWindow):
             self._last_geometry = geometry
 
         def job():
+            t0 = time.time()
             prep = doc.prepare(s)
+            t1 = time.time()
             glob = P.compute_globals(prep, s)
             scale = min(1.0, PREVIEW_LONG_SIDE / prep.long_side)
             img = P.render(prep, s, None, scale, glob)
+            if t1 - t0 > 0.5:
+                log.info("Vorschau: Vorbereiten %.1f s, Berechnen %.1f s", t1 - t0,
+                         time.time() - t1)
             return dict(qimg=gray_qimage(P.to_uint(img, 8)), size=prep.size, scale=scale,
                         before=P.histogram(prep.stats), after=P.histogram(img),
                         levels=glob.levels)
@@ -634,6 +654,8 @@ class MainWindow(QMainWindow):
         self._update_zoom_label()
 
     def _render_detail(self):
+        if self.doc and self.tabs.currentIndex() == 0 and self.view.mode == "crop":
+            return self._render_crop_detail()
         if not self.doc or self.tabs.currentIndex() != 1 or self.view.mode != "edit":
             return
         z = self.view.zoom()
@@ -666,7 +688,45 @@ class MainWindow(QMainWindow):
 
         self._submit("detail", job)
 
+    def _render_crop_detail(self):
+        """Zuschneiden: beim Hineinzoomen den sichtbaren Bereich in voller Auflösung zeigen."""
+        z = self.view.zoom()
+        if z <= self._crop_scale * 1.15:
+            self._gen["detail"] += 1
+            self.view.clear_detail()
+            return
+        if self._busy["detail"]:
+            self._pending["detail"] = True
+            return
+        W, H = self.doc.size
+        r = self.view.visible_source_rect()
+        x = max(0, int(r.left() - r.width() * 0.1))
+        y = max(0, int(r.top() - r.height() * 0.1))
+        x1 = min(W, int(np.ceil(r.right() + r.width() * 0.1)))
+        y1 = min(H, int(np.ceil(r.bottom() + r.height() * 0.1)))
+        if x1 <= x or y1 <= y:
+            return
+        scale = min(1.0, z)
+        raw, (lo, hi) = self.doc.raw, self._crop_levels
+
+        def job():
+            tile = P.as_float(raw[y:y1, x:x1])
+            if scale < 0.999:
+                tile = cv2.resize(tile, (max(1, round((x1 - x) * scale)),
+                                         max(1, round((y1 - y) * scale))),
+                                  interpolation=cv2.INTER_AREA)
+            img = P.to_uint((tile - lo) / (hi - lo), 8)
+            return dict(qimg=gray_qimage(img), x=x, y=y, scale=img.shape[1] / (x1 - x),
+                        mode="crop")
+
+        self._submit("detail", job)
+
     def _done_detail(self, r):
+        if r.get("mode") == "crop":
+            if self.tabs.currentIndex() == 0:
+                self.view.set_detail(r["qimg"], r["x"], r["y"], r["scale"],
+                                     self.entry.settings.rotation)
+            return
         if self.tabs.currentIndex() != 1 or r["geometry"] != self._last_geometry:
             return
         self.view.set_detail(r["qimg"], r["x"], r["y"], r["scale"])
@@ -698,8 +758,7 @@ class MainWindow(QMainWindow):
 
     def _on_view_changed(self):
         self._update_zoom_label()
-        if self.view.mode == "edit":
-            self._t_detail.start()
+        self._t_detail.start()
 
     # ================================================================ Einstellungen
     def _set_settings(self, s: P.Settings, history=True, sync=False):
@@ -851,8 +910,9 @@ class MainWindow(QMainWindow):
             self._gen["detail"] += 1
             self.view.clear_detail()
             self.view.set_mode("crop")
-            self.view.set_image(self._crop_qimage, self.doc.size, 1.0,
+            self.view.set_image(self._crop_qimage, self.doc.size, self._crop_scale,
                                 self.entry.settings.rotation)
+            self._t_detail.start()
             self.view.fit()
             self._sync_crop_controls()
         else:

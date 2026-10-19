@@ -97,9 +97,10 @@ def self_test(win, app, image, report) -> int:
     def shot(name):
         win.grab().save(os.path.join(shots, f"selbsttest_{name}.png"))
 
+    t0 = time.time()
     win.add_files([image])
     wait(120)
-    check("Bild geladen", win.doc is not None)
+    check("Bild geladen", win.doc is not None, f"({time.time() - t0:.1f} s)")
     win.tabs.setCurrentIndex(0)
     win._on_tab(0)
     wait()
@@ -112,9 +113,11 @@ def self_test(win, app, image, report) -> int:
     win.sl_rotation.setValue(0.3)
     win.sl_rotation.valueChanged.emit(0.3)
     wait()
+    t0 = time.time()
     win.tabs.setCurrentIndex(1)
     wait()
-    check("Vorschau berechnet", not win.view.pix_item.pixmap().isNull())
+    check("Vorschau berechnet", not win.view.pix_item.pixmap().isNull(),
+          f"({time.time() - t0:.1f} s inkl. Drehung)")
     check("Histogramm berechnet", win.histogram._after is not None)
     c = _viewport_contrast(win)
     check("Vorschau sichtbar", c > 3, f"(Kontrast {c:.1f})")

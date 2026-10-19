@@ -167,6 +167,8 @@ class ImageView(QGraphicsView):
         self._pan = None
         self._img_size = (0, 0)
         self._pix_scale = 1.0
+        self._rotation = 0.0
+        self._detail_params = None
         self._has_image = False
 
         self.horizontalScrollBar().valueChanged.connect(lambda _: self.viewChanged.emit())
@@ -187,26 +189,47 @@ class ImageView(QGraphicsView):
         if first:
             self.fit()
 
-    def set_display_rotation(self, angle):
-        """Schnelle Vorschau der Drehung im Zuschneidemodus (um die Bildmitte)."""
+    def _rotation_transform(self, angle):
         w, h = self._img_size
         cx, cy = (w - 1) / 2, (h - 1) / 2
-        t = QTransform.fromScale(1 / self._pix_scale, 1 / self._pix_scale)
-        if angle:
-            t = t * QTransform.fromTranslate(-cx, -cy) * QTransform().rotate(angle) \
-                * QTransform.fromTranslate(cx, cy)
-        self.pix_item.setTransform(t)
+        if not angle:
+            return QTransform()
+        return QTransform.fromTranslate(-cx, -cy) * QTransform().rotate(angle) \
+            * QTransform.fromTranslate(cx, cy)
+
+    def set_display_rotation(self, angle):
+        """Schnelle Vorschau der Drehung im Zuschneidemodus (um die Bildmitte)."""
+        self._rotation = angle
+        rot = self._rotation_transform(angle)
+        self.pix_item.setTransform(
+            QTransform.fromScale(1 / self._pix_scale, 1 / self._pix_scale) * rot)
+        if self._detail_params:
+            x, y, scale = self._detail_params
+            self.detail_item.setTransform(
+                QTransform.fromScale(1 / scale, 1 / scale) * QTransform.fromTranslate(x, y)
+                * rot)
         self.viewport().update()
 
-    def set_detail(self, qimage, x, y, scale):
+    def visible_source_rect(self) -> QRectF:
+        """Sichtbarer Bereich in Pixeln des (ungedrehten) Quellbildes."""
+        poly = self.mapToScene(self.viewport().rect())
+        r = self.pix_item.mapFromScene(poly).boundingRect()
+        s = self._pix_scale
+        return QRectF(r.x() / s, r.y() / s, r.width() / s, r.height() / s)
+
+    def set_detail(self, qimage, x, y, scale, rotation=0.0):
+        """Ausschnitt in voller Auflösung über die verkleinerte Ansicht legen."""
         self.detail_item.setPixmap(QPixmap.fromImage(qimage))
-        self.detail_item.setScale(1.0 / scale)
-        self.detail_item.setPos(x, y)
+        self._detail_params = (x, y, scale)
+        self.detail_item.setTransform(
+            QTransform.fromScale(1 / scale, 1 / scale) * QTransform.fromTranslate(x, y)
+            * self._rotation_transform(rotation))
         self.detail_item.show()
 
     def clear_detail(self):
         self.detail_item.hide()
         self.detail_item.setPixmap(QPixmap())
+        self._detail_params = None
 
     def clear(self):
         self.pix_item.setPixmap(QPixmap())
