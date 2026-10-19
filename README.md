@@ -45,8 +45,8 @@ erscheint, wenn Pixel bei 0 oder 255 anstoßen.
 **Voreinstellungen:**
 - **Automatisch (empfohlen):** misst jedes Bild und stellt Streckung, Abflachen und Schärfe
   passend ein.
-- **Standard (Bachelorarbeit):** Streckung und weiches Abflachen in Glockenform.
-- **Varianten:** Abflachen stark, Abflachen schonend, Nur strecken.
+- **Standard (Bachelorarbeit):** lineare Histogrammstreckung auf 1–255 wie in Abb. 1, leichtes Schärfen.
+- **Varianten:** Abflachen weich, Abflachen stark, Abflachen schonend, Nur strecken.
 - **Nach Bildinhalt:** Stadt/Bebauung, Wald, Wiesen & Felder, Wasser/Fluss.
 - **Nach Bildproblem:** Flau, Details/Auswertung, Zu dunkel, Zu hell, Ungleich belichtet,
   Grobkörnig, Staub & Kratzer.

@@ -38,11 +38,16 @@ def _p(**kw):
 BUILTIN_PRESETS: dict[str, dict] = {
     "Original": {},
     AUTO: {},
-    "Standard (Bachelorarbeit)": _p(hist_flat=0.8, hist_mode="glocke", **_SHARP),
-    # --- Varianten des Abflachens
-    "Abflachen stark": _p(hist_flat=0.85, hist_mode="gleichmaessig", **_SHARP),
-    "Abflachen schonend": _p(hist_flat=0.9, hist_mode="begrenzt", **_SHARP),
-    "Nur strecken": _p(**_SHARP),
+    # wie Abb. 1 der Bachelorarbeit: lineare Streckung auf 1–255. Die Spitze wird dabei
+    # flacher, weil sich dieselben Pixel auf mehr Grauwerte verteilen; die Helligkeits-
+    # verhältnisse (und damit die Zeichnung in den Lichtern) bleiben erhalten.
+    "Standard (Bachelorarbeit)": _p(sharpen_amount=0.4, sharpen_radius=1.0,
+                                    sharpen_threshold=0.01),
+    # --- Varianten des Abflachens (zusätzlich zur Streckung)
+    "Abflachen weich": _p(hist_flat=0.6, hist_mode="glocke", **_SHARP),
+    "Abflachen stark": _p(hist_flat=0.7, hist_mode="gleichmaessig", **_SHARP),
+    "Abflachen schonend": _p(hist_flat=0.8, hist_mode="begrenzt", **_SHARP),
+    "Nur strecken": _p(),
     # --- nach Bildinhalt
     "Stadt / Bebauung": _p(hist_flat=0.5, hist_mode="glocke", sharpen_amount=0.9,
                            sharpen_radius=0.8, sharpen_threshold=0.01),

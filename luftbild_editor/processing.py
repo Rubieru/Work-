@@ -533,8 +533,19 @@ HIST_MODES = {
 }
 
 
+# Steigungsgrenzen der Abflach-Kurve: kein Grauwertbereich wird stärker als um diesen
+# Faktor zusammengedrückt bzw. gespreizt. Ein ungebremster Histogrammausgleich drückt
+# die seltenen Lichter (Dächer, Schnee, Trichterränder) zusammen – dort verschwindet
+# die Zeichnung, und das Bild wirkt aufgehellt.
+FLAT_SLOPE = {"glocke": (0.6, 2.0), "gleichmaessig": (0.5, 3.0), "begrenzt": (0.7, 1.8)}
+
+
 def _flatten_lut(sample: np.ndarray, mode: str) -> np.ndarray:
-    """Abbildung 0..1 -> 0..1, die das Histogramm abflacht (globaler Histogrammausgleich)."""
+    """Abbildung 0..1 -> 0..1, die das Histogramm abflacht (globaler Histogrammausgleich).
+
+    Die mittlere Helligkeit (Median) bleibt erhalten, und die Kurve ist in ihrer
+    Steigung begrenzt, damit Lichter und Schatten ihre Zeichnung behalten.
+    """
     hist, _ = np.histogram(sample, bins=HIST_BINS, range=(0.0, 1.0))
     hist = hist.astype(np.float64) + 1e-9
     if mode == "begrenzt":  # Spitze kappen, Überschuss gleichmäßig verteilen
@@ -544,15 +555,19 @@ def _flatten_lut(sample: np.ndarray, mode: str) -> np.ndarray:
     cdf = np.cumsum(hist)
     cdf = (cdf - cdf[0]) / max(cdf[-1] - cdf[0], 1e-12)
     if mode == "glocke":
-        # auf eine breite Glockenkurve abbilden (Mittelwert 0,5, Streuung 0,3):
-        # flacher als das Original, aber ohne die Härte eines vollen Ausgleichs
+        # auf eine breite Glockenkurve abbilden (Streuung 0,3), deren Mitte beim Median
+        # des Bildes liegt: flacher als das Original, ohne die Helligkeit zu verschieben
         from math import erf, sqrt
+        center = float(np.clip(np.median(sample), 0.3, 0.7))
         xs = np.linspace(0, 1, 2048)
         sigma = 0.3
-        norm = np.array([0.5 * (1 + erf((x - 0.5) / (sigma * sqrt(2)))) for x in xs])
+        norm = np.array([0.5 * (1 + erf((x - center) / (sigma * sqrt(2)))) for x in xs])
         norm = (norm - norm[0]) / (norm[-1] - norm[0])
         cdf = np.interp(cdf, norm, xs)
-    return cdf.astype(np.float32)
+    lo, hi = FLAT_SLOPE.get(mode, (0.5, 2.0))
+    slope = np.clip(np.diff(cdf) * (HIST_BINS - 1), lo, hi)
+    lut = np.concatenate([[0.0], np.cumsum(slope)])
+    return (lut / lut[-1]).astype(np.float32)
 
 
 def curve_lut(points, n: int = 1024) -> np.ndarray | None:
@@ -715,7 +730,7 @@ def auto_tonal(prep: Prepared) -> dict:
     hist, _ = np.histogram(x, bins=64, range=(0, 1))
     frac = hist / max(hist.sum(), 1)
     window = np.convolve(frac, np.ones(16), mode="valid").max()
-    hist_flat = float(np.clip(0.5 + (window - 0.35) * 2.0, 0.5, 0.95))
+    hist_flat = float(np.clip((window - 0.4) * 2.0, 0.0, 0.5))
 
     # Helligkeit: die Glockenform zentriert ohnehin; nur bei sehr hellen/dunklen
     # Bildern leicht nachhelfen
@@ -818,7 +833,7 @@ def apply_tonal(img: np.ndarray, prep: Prepared, s: Settings, glob: Globals,
     return img
 
 
-SOFT_KNEE = 0.1  # Breite des weichen Übergangs an Schwarz und Weiß
+SOFT_KNEE = 0.04  # Breite des weichen Übergangs an Schwarz und Weiß
 
 
 def soft_clip(img: np.ndarray, knee: float = SOFT_KNEE) -> np.ndarray:

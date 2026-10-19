@@ -120,7 +120,7 @@ def test_equalize_increases_local_contrast():
 
 
 def test_soft_clip_keeps_midtones_and_highlight_detail():
-    x = np.linspace(-0.3, 1.3, 1601, dtype=np.float32)
+    x = np.linspace(-0.1, 1.1, 1201, dtype=np.float32)
     y = P.soft_clip(x)
     mid = (x > 0.15) & (x < 0.85)
     np.testing.assert_allclose(y[mid], x[mid], atol=1e-6)
@@ -148,7 +148,7 @@ def test_auto_preset_values():
     doc = make_doc()
     assert preset_values(AUTO) is None
     v = preset_values(AUTO, doc.prepare(P.Settings()))
-    assert v["stretch"] and 0.5 <= v["hist_flat"] <= 0.95 and v["stats_center"]
+    assert v["stretch"] and 0.0 <= v["hist_flat"] <= 0.5 and v["stats_center"]
 
 
 def test_histogram_accepts_large_1d_samples():
@@ -194,3 +194,19 @@ def test_curve_lut_is_monotone_and_hits_points():
 def test_nodata_safe_output_has_no_zero():
     out = P.to_uint(np.array([[0.0, 0.5, 1.0]], np.float32), 8, nodata_safe=True)
     assert out.min() == 1 and out.max() == 255
+
+
+def test_flatten_keeps_brightness_and_highlight_detail():
+    # Gipfel in den Mitteltönen, wenige helle Pixel (Dächer, Schnee)
+    rng = np.random.default_rng(1)
+    vals = np.concatenate([rng.normal(0.5, 0.06, 90_000), rng.uniform(0.75, 1.0, 10_000)])
+    img = np.clip(vals, 0, 1).astype(np.float32).reshape(250, 400)
+    doc = P.Document(P.LoadedImage(img, 16, None))
+    prep = doc.prepare(P.Settings())
+    base = P.Settings(stretch=True, clip_black=0.1, clip_white=0.05, stats_center=False)
+    lin = P.render(prep, base)
+    for mode in ("glocke", "begrenzt"):   # "gleichmaessig" ist bewusst stark
+        out = P.render(prep, replace(base, hist_flat=1.0, hist_mode=mode))
+        assert abs(float(np.median(out)) - float(np.median(lin))) < 0.1
+        hl = vals.reshape(250, 400) > 0.8      # Zeichnung in den Lichtern bleibt
+        assert out[hl].std() > 0.5 * lin[hl].std()
