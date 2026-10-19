@@ -37,6 +37,7 @@ class Settings:
     # Bildfehler
     invert: bool = False           # Negativ umkehren
     flatten: float = 0.0           # Ausleuchtung ausgleichen 0..1
+    dust: float = 0.0              # Staub & Kratzer entfernen 0..1
     denoise: float = 0.0           # Filmkorn reduzieren 0..1
 
     # Kontrast
@@ -44,6 +45,7 @@ class Settings:
     clip_black: float = 0.5        # % der dunkelsten Pixel, die schwarz werden
     clip_white: float = 0.5        # % der hellsten Pixel, die weiß werden
     midtones: float = 0.0          # -1 (dunkler) .. +1 (heller)
+    equalize: float = 0.0          # Kontrastausgleich je Bildbereich (CLAHE) 0..1
     clarity: float = 0.0           # lokaler Kontrast 0..1
 
     # Schärfen (Unscharf maskieren)
@@ -338,22 +340,122 @@ def _apply_gain(img: np.ndarray, prep: Prepared, s: Settings, x0: float, y0: flo
     return img * g
 
 
-def compute_levels(prep: Prepared, s: Settings) -> tuple[float, float]:
-    """Schwarz- und Weißpunkt der Histogrammstreckung (global, einmal pro Einstellung)."""
-    if not s.stretch:
-        return 0.0, 1.0
+@dataclass
+class Globals:
+    """Werte, die einmal für das ganze Bild berechnet und überall gleich angewendet werden."""
+    levels: tuple = (0.0, 1.0)     # Schwarz-/Weißpunkt der Histogrammstreckung
+    clahe: np.ndarray | None = None  # Kontrastausgleich-Tabellen (ny, nx, bins)
+
+
+CLAHE_TILES = 8       # Kacheln entlang der langen Bildseite
+CLAHE_BINS = 512
+CLAHE_CLIP = 3.0      # Begrenzung relativ zur mittleren Histogrammhöhe
+
+
+def _stats_tonal(prep: Prepared, s: Settings) -> np.ndarray:
     st = prep.stats
     if s.invert:
         st = 1.0 - st
     if s.flatten > 0:
         sc = st.shape[1] / prep.base.shape[1]
         st = _apply_gain(st, prep, s, 0.0, 0.0, sc)
+    return st
+
+
+def compute_levels(prep: Prepared, s: Settings) -> tuple[float, float]:
+    """Schwarz- und Weißpunkt der Histogrammstreckung."""
+    if not s.stretch:
+        return 0.0, 1.0
+    st = _stats_tonal(prep, s)
     sample = st[::2, ::2] if st.size > 1_500_000 else st
     lo, hi = np.percentile(sample, [s.clip_black, 100.0 - s.clip_white])
     lo, hi = float(lo), float(hi)
     if hi - lo < 1e-4:
         hi = lo + 1e-4
     return lo, hi
+
+
+def clahe_grid(w: int, h: int) -> tuple[int, int]:
+    if w >= h:
+        return max(2, round(CLAHE_TILES * h / w)), CLAHE_TILES
+    return CLAHE_TILES, max(2, round(CLAHE_TILES * w / h))
+
+
+def _clahe_tables(img: np.ndarray) -> np.ndarray:
+    """Pro Kachel eine Abbildungstabelle (Histogrammausgleich mit Begrenzung).
+
+    Entspricht CLAHE bzw. dem für historische Luftbilder entwickelten
+    "Multidodging": Ausgleich je Bildausschnitt, Übergänge werden interpoliert.
+    """
+    h, w = img.shape
+    ny, nx = clahe_grid(w, h)
+    ys = np.linspace(0, h, ny + 1).round().astype(int)
+    xs = np.linspace(0, w, nx + 1).round().astype(int)
+    tables = np.empty((ny, nx, CLAHE_BINS), np.float32)
+    for j in range(ny):
+        for i in range(nx):
+            tile = img[ys[j]:ys[j + 1], xs[i]:xs[i + 1]]
+            hist, _ = np.histogram(tile, bins=CLAHE_BINS, range=(0.0, 1.0))
+            hist = hist.astype(np.float64)
+            limit = max(1.0, CLAHE_CLIP * hist.sum() / CLAHE_BINS)
+            excess = np.maximum(hist - limit, 0).sum()
+            hist = np.minimum(hist, limit) + excess / CLAHE_BINS
+            cdf = np.cumsum(hist)
+            cdf = (cdf - cdf[0]) / max(cdf[-1] - cdf[0], 1e-9)
+            tables[j, i] = cdf
+    return tables
+
+
+def compute_globals(prep: Prepared, s: Settings) -> Globals:
+    levels = compute_levels(prep, s)
+    clahe = None
+    if s.equalize > 0:
+        st = _stats_tonal(prep, s)
+        st = _levels_gamma(st.astype(np.float32, copy=True), s, levels)
+        clahe = _clahe_tables(st)
+    return Globals(levels, clahe)
+
+
+def _levels_gamma(img: np.ndarray, s: Settings, levels) -> np.ndarray:
+    lo, hi = levels
+    if (lo, hi) != (0.0, 1.0):
+        img = (img - lo) * (1.0 / (hi - lo))
+    np.clip(img, 0.0, 1.0, out=img)
+    if abs(s.midtones) > 1e-4:
+        img = np.power(img, 3.0 ** (-s.midtones), dtype=np.float32)
+    return img
+
+
+def _apply_clahe(img, tables, strength, base_w, base_h, x0, y0, scale):
+    ny, nx, nb = tables.shape
+    h, w = img.shape
+    # Kachelkoordinaten der Pixelmitten (Kachelmitten liegen bei ganzen Zahlen)
+    bx = x0 + (np.arange(w, dtype=np.float32) + 0.5) / scale
+    by = y0 + (np.arange(h, dtype=np.float32) + 0.5) / scale
+    fx = np.clip(bx / base_w * nx - 0.5, 0, nx - 1)
+    fy = np.clip(by / base_h * ny - 0.5, 0, ny - 1)
+    ix0 = np.minimum(fx.astype(np.int32), nx - 1)
+    iy0 = np.minimum(fy.astype(np.int32), ny - 1)
+    ix1 = np.minimum(ix0 + 1, nx - 1)
+    iy1 = np.minimum(iy0 + 1, ny - 1)
+    wx = (fx - ix0)[None, :]
+    wy = (fy - iy0)[:, None]
+    v = img * (nb - 1)
+    b0 = np.minimum(v.astype(np.int32), nb - 2)
+    tb = v - b0
+
+    flat = tables.reshape(ny * nx, nb)
+
+    def lut(iy, ix):
+        idx = (iy[:, None] * nx + ix[None, :])
+        a = flat[idx, b0]
+        b = flat[idx, b0 + 1]
+        return a + (b - a) * tb
+
+    top = lut(iy0, ix0) * (1 - wx) + lut(iy0, ix1) * wx
+    bot = lut(iy1, ix0) * (1 - wx) + lut(iy1, ix1) * wx
+    eq = top * (1 - wy) + bot * wy
+    return img + strength * (eq.astype(np.float32) - img)
 
 
 def filter_margin(prep: Prepared, s: Settings) -> int:
@@ -368,10 +470,12 @@ def filter_margin(prep: Prepared, s: Settings) -> int:
         m = max(m, 4 * CLARITY_SIGMA_REL * prep.long_side + 2)
     if s.denoise > 0:
         m = max(m, 2 * (1 + 3 * s.denoise) * 1.5 + 2)
+    if s.dust > 0:
+        m += 3
     return int(math.ceil(m))
 
 
-def apply_tonal(img: np.ndarray, prep: Prepared, s: Settings, levels: tuple[float, float],
+def apply_tonal(img: np.ndarray, prep: Prepared, s: Settings, glob: Globals,
                 x0: float, y0: float, scale: float) -> np.ndarray:
     """img: Ausschnitt mit Ursprung (x0, y0) in Basispixeln, verkleinert um scale."""
     img = img.astype(np.float32, copy=True)
@@ -379,20 +483,24 @@ def apply_tonal(img: np.ndarray, prep: Prepared, s: Settings, levels: tuple[floa
         img = 1.0 - img
     if s.flatten > 0:
         img = _apply_gain(img, prep, s, x0, y0, scale)
+    if s.dust > 0:
+        # Staub/Kratzer: Ausreißer gegenüber dem Median der Umgebung ersetzen
+        lo, hi = glob.levels
+        thr = (0.30 - 0.26 * s.dust) * (hi - lo)
+        med = cv2.medianBlur(img, 5 if scale >= 0.6 else 3)
+        mask = np.abs(img - med) > thr
+        img = np.where(mask, med, img)
     if s.denoise > 0:
         sigma_space = (1 + 3 * s.denoise) * scale
         if sigma_space >= 0.4:
-            sigma_color = 0.01 + 0.09 * s.denoise
-            img = cv2.bilateralFilter(img, 0, sigma_color, sigma_space)
+            sigma_color = (0.01 + 0.09 * s.denoise) * (glob.levels[1] - glob.levels[0])
+            img = cv2.bilateralFilter(img, 0, max(sigma_color, 1e-3), sigma_space)
 
-    lo, hi = levels
-    if (lo, hi) != (0.0, 1.0):
-        img = (img - lo) * (1.0 / (hi - lo))
-    np.clip(img, 0.0, 1.0, out=img)
+    img = _levels_gamma(img, s, glob.levels)
 
-    if abs(s.midtones) > 1e-4:
-        gamma = 3.0 ** (-s.midtones)
-        img = np.power(img, gamma, dtype=np.float32)
+    if s.equalize > 0 and glob.clahe is not None:
+        W, H = prep.size
+        img = _apply_clahe(img, glob.clahe, s.equalize, W, H, x0, y0, scale)
 
     if s.clarity > 0:
         sigma = CLARITY_SIGMA_REL * prep.long_side * scale
@@ -415,7 +523,7 @@ def apply_tonal(img: np.ndarray, prep: Prepared, s: Settings, levels: tuple[floa
 
 
 def render(prep: Prepared, s: Settings, region=None, scale: float = 1.0,
-           levels: tuple[float, float] | None = None) -> np.ndarray:
+           glob: Globals | None = None) -> np.ndarray:
     """Berechnet einen Ausschnitt (x, y, w, h in Basispixeln) in der Größe scale.
 
     Die Ausgabe hat round(w*scale) x round(h*scale) Pixel.
@@ -423,8 +531,8 @@ def render(prep: Prepared, s: Settings, region=None, scale: float = 1.0,
     W, H = prep.size
     x, y, w, h = region if region is not None else (0, 0, W, H)
     scale = min(float(scale), 1.0)
-    if levels is None:
-        levels = compute_levels(prep, s)
+    if glob is None:
+        glob = compute_globals(prep, s)
 
     # kleinste Auflösungsstufe wählen, die nicht hochskaliert werden muss
     ls, src = prep.levels[-1]
@@ -451,7 +559,7 @@ def render(prep: Prepared, s: Settings, region=None, scale: float = 1.0,
         fx = 1.0
     eff = ls * fx  # Ausgabepixel pro Basispixel
 
-    out = apply_tonal(tile, prep, s, levels, x0l / ls, y0l / ls, eff)
+    out = apply_tonal(tile, prep, s, glob, x0l / ls, y0l / ls, eff)
 
     cx = int(round((x * ls - x0l) * fx))
     cy = int(round((y * ls - y0l) * fx))
@@ -468,13 +576,13 @@ def render_full(doc: Document, s: Settings, bits: int = 16, tile: int = 2048,
                 progress=None) -> np.ndarray:
     """Volle Auflösung, gekachelt (spart Arbeitsspeicher bei großen Scans)."""
     prep = doc.prepare(s)
-    levels = compute_levels(prep, s)
+    glob = compute_globals(prep, s)
     W, H = prep.size
     out = np.empty((H, W), dtype=np.uint16 if bits == 16 else np.uint8)
     tiles = [(x, y) for y in range(0, H, tile) for x in range(0, W, tile)]
     for i, (x, y) in enumerate(tiles):
         w, h = min(tile, W - x), min(tile, H - y)
-        out[y:y + h, x:x + w] = to_uint(render(prep, s, (x, y, w, h), 1.0, levels), bits)
+        out[y:y + h, x:x + w] = to_uint(render(prep, s, (x, y, w, h), 1.0, glob), bits)
         if progress:
             progress(i + 1, len(tiles))
     return out

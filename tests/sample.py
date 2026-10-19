@@ -34,3 +34,13 @@ def synthetic_aerial(w=3000, h=2200, seed=1) -> np.ndarray:
     img[:40, :] = img[-40:, :] = 0.02
     img[:, :40] = img[:, -40:] = 0.02
     return img
+
+
+def write_big_sample(path, w=10701, h=10137):
+    """Großer 8-Bit-Scan wie ein echtes Luftbild (für den Selbsttest der .exe)."""
+    import sys
+    sys.path.insert(0, ".")
+    from luftbild_editor import processing as P
+    small = synthetic_aerial(w // 4, h // 4)
+    big = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
+    P.save_image(path, P.to_uint(big, 8), "tif8", 1200)

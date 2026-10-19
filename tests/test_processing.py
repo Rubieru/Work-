@@ -67,7 +67,7 @@ def test_preview_approximates_full_resolution():
 
 def test_region_render_shape():
     doc = make_doc()
-    s = P.with_tonal(P.Settings(), BUILTIN_PRESETS["Kräftig"])
+    s = P.with_tonal(P.Settings(), BUILTIN_PRESETS["Details / Auswertung"])
     out = P.render(doc.prepare(s), s, (100, 50, 200, 120), 0.5)
     assert out.shape == (60, 100)
 
@@ -80,7 +80,7 @@ def test_rotation_keeps_canvas():
 
 def test_save_and_load_roundtrip(tmp_path):
     doc = make_doc()
-    s = P.with_tonal(P.Settings(crop=(0, 0, 300, 200)), BUILTIN_PRESETS["Standard"])
+    s = P.with_tonal(P.Settings(crop=(0, 0, 300, 200)), BUILTIN_PRESETS["Standard Luftbild"])
     for fmt, (_, ext) in P.EXPORT_FORMATS.items():
         path = str(tmp_path / f"Luftbild_ä_{fmt}{ext}")
         P.export(doc, s, path, fmt)
@@ -94,3 +94,25 @@ def test_save_and_load_roundtrip(tmp_path):
 def test_settings_json_roundtrip():
     s = P.Settings(rotation=1.25, crop=(1, 2, 3, 4), stretch=True, clarity=0.3)
     assert P.settings_from_json(P.settings_to_json(s)) == s
+
+
+def test_dust_removal_removes_spots():
+    doc = make_doc()
+    img = doc.original.copy()
+    img[100, 100] = 1.0
+    img[200:202, 300:302] = 0.0
+    doc = P.Document(P.LoadedImage(img, 16, None))
+    s = P.Settings(dust=0.8)
+    out = P.render(doc.prepare(s), s)
+    assert abs(out[100, 100] - img[99, 100]) < 0.1
+    assert abs(out[200, 300] - img[198, 300]) < 0.1
+
+
+def test_equalize_increases_local_contrast():
+    doc = make_doc()
+    s = P.Settings(stretch=True, equalize=1.0)
+    prep = doc.prepare(s)
+    out = P.render(prep, s)
+    base = P.render(prep, P.Settings(stretch=True))
+    assert out.std() > 0.9 * base.std()
+    assert 0.0 <= out.min() and out.max() <= 1.0

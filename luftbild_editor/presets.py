@@ -7,39 +7,58 @@ import os
 from .processing import TONAL_FIELDS
 
 # Nur Tonwert-/Filterwerte. Zuschnitt und Drehung bleiben beim Bild.
+#
+# Abgestimmt auf gescannte Schwarz-Weiß-Luftbilder (Reihenmesskammer-Filme):
+# - Histogrammstreckung mit kleinem Abschnitt (0,2–1 %), damit Lichter auf
+#   Dächern/Wegen nicht ausfressen.
+# - Kontrastausgleich (CLAHE, wie das für Weltkriegs-Luftbilder entwickelte
+#   "Multidodging") holt Details aus flauen Bereichen.
+# - Unscharf maskieren mit Radius ~1 px und Stärke ~80 % als Grundwert; die
+#   Schwelle verhindert, dass Filmkorn mitgeschärft wird.
 BUILTIN_PRESETS: dict[str, dict] = {
     "Original": {},
-    "Standard": {
-        "stretch": True, "clip_black": 0.5, "clip_white": 0.5,
-        "sharpen_amount": 0.8, "sharpen_radius": 1.0,
+    "Standard Luftbild": {
+        "stretch": True, "clip_black": 0.3, "clip_white": 0.3, "equalize": 0.35,
+        "sharpen_amount": 0.8, "sharpen_radius": 1.0, "sharpen_threshold": 0.008,
     },
-    "Kräftig": {
-        "stretch": True, "clip_black": 1.0, "clip_white": 1.0, "clarity": 0.35,
-        "sharpen_amount": 1.2, "sharpen_radius": 1.2, "sharpen_threshold": 0.01,
-    },
-    "Flaues Bild": {
-        "stretch": True, "clip_black": 2.0, "clip_white": 1.0, "midtones": -0.1,
-        "clarity": 0.6, "sharpen_amount": 1.0, "sharpen_radius": 1.2,
+    "Flau / kontrastarm": {
+        "stretch": True, "clip_black": 1.0, "clip_white": 0.5, "equalize": 0.8,
+        "sharpen_amount": 0.8, "sharpen_radius": 1.2, "sharpen_threshold": 0.01,
     },
     "Ungleich belichtet": {
         "flatten": 0.8, "stretch": True, "clip_black": 0.5, "clip_white": 0.5,
-        "clarity": 0.3, "sharpen_amount": 0.8, "sharpen_radius": 1.0,
+        "equalize": 0.5, "sharpen_amount": 0.7, "sharpen_radius": 1.0,
+        "sharpen_threshold": 0.008,
     },
-    "Körnig / verrauscht": {
-        "denoise": 0.5, "stretch": True, "clip_black": 0.5, "clip_white": 0.5,
-        "sharpen_amount": 0.7, "sharpen_radius": 1.8, "sharpen_threshold": 0.02,
+    "Details / Auswertung": {
+        "stretch": True, "clip_black": 0.5, "clip_white": 0.5, "equalize": 0.6,
+        "clarity": 0.25, "sharpen_amount": 1.4, "sharpen_radius": 0.8,
+        "sharpen_threshold": 0.01,
     },
-    "Feine Details": {
-        "stretch": True, "clip_black": 0.3, "clip_white": 0.3,
-        "sharpen_amount": 1.6, "sharpen_radius": 0.7, "sharpen_threshold": 0.008,
+    "Grobkörnig": {
+        "dust": 0.3, "denoise": 0.6, "stretch": True, "clip_black": 0.5,
+        "clip_white": 0.5, "equalize": 0.3, "sharpen_amount": 0.6,
+        "sharpen_radius": 1.6, "sharpen_threshold": 0.02,
     },
-    "Dunkler Scan": {
-        "stretch": True, "clip_black": 0.3, "clip_white": 1.0, "midtones": 0.35,
-        "clarity": 0.2, "sharpen_amount": 0.8, "sharpen_radius": 1.0,
+    "Staub & Kratzer": {
+        "dust": 0.75, "denoise": 0.2, "stretch": True, "clip_black": 0.3,
+        "clip_white": 0.3, "equalize": 0.3, "sharpen_amount": 0.6,
+        "sharpen_radius": 1.0, "sharpen_threshold": 0.015,
+    },
+    "Zu dunkel": {
+        "stretch": True, "clip_black": 0.2, "clip_white": 1.0, "midtones": 0.35,
+        "equalize": 0.4, "sharpen_amount": 0.8, "sharpen_radius": 1.0,
+        "sharpen_threshold": 0.008,
+    },
+    "Zu hell": {
+        "stretch": True, "clip_black": 1.0, "clip_white": 0.2, "midtones": -0.3,
+        "equalize": 0.4, "sharpen_amount": 0.8, "sharpen_radius": 1.0,
+        "sharpen_threshold": 0.008,
     },
     "Negativ": {
-        "invert": True, "stretch": True, "clip_black": 0.5, "clip_white": 0.5,
-        "sharpen_amount": 0.8, "sharpen_radius": 1.0,
+        "invert": True, "stretch": True, "clip_black": 0.3, "clip_white": 0.3,
+        "equalize": 0.35, "sharpen_amount": 0.8, "sharpen_radius": 1.0,
+        "sharpen_threshold": 0.008,
     },
 }
 

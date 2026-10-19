@@ -1,8 +1,8 @@
 """Hauptfenster des Luftbild-Editors."""
 from __future__ import annotations
 
+import logging
 import os
-import traceback
 from dataclasses import dataclass, field, replace
 
 import numpy as np
@@ -22,6 +22,8 @@ from .presets import BUILTIN_PRESETS, load_user_presets, save_user_presets
 from .widgets import HistogramWidget, ImageView, LabeledSlider
 
 PREVIEW_LONG_SIDE = 2000
+log = logging.getLogger("luftbild_editor")
+LOG_FILE = ""
 THUMB_LONG_SIDE = 128
 IMAGE_FILTER = "Bilder (*.tif *.tiff *.png *.jpg *.jpeg *.bmp *.jp2);;Alle Dateien (*)"
 
@@ -54,8 +56,10 @@ class _Job(QRunnable):
         try:
             res = self.fn()
             self.signals.result.emit(self.kind, self.gen, res)
-        except Exception as exc:  # Fehler im Hintergrund an die Oberfläche melden
-            traceback.print_exc()
+        except BaseException as exc:  # Fehler im Hintergrund an die Oberfläche melden
+            log.exception("Fehler bei Hintergrundaufgabe '%s'", self.kind)
+            if isinstance(exc, MemoryError):
+                exc = MemoryError("Nicht genug Arbeitsspeicher für dieses Bild.")
             self.signals.result.emit("error:" + self.kind, self.gen, exc)
 
 
@@ -77,6 +81,7 @@ class MainWindow(QMainWindow):
         self._preview_scale = 1.0
         self._last_geometry = None
         self._progress = None
+        self._errors_shown = set()
 
         self.pool = QThreadPool.globalInstance()
         self.sig = _Signals()
@@ -174,6 +179,11 @@ class MainWindow(QMainWindow):
             "QPushButton:disabled { background: #555; color: #888; }")
         self.btn_export.clicked.connect(self.export_current)
         rl.addWidget(self.btn_export)
+        self.btn_batch = QPushButton("Stapelverarbeitung: Einstellungen auf weitere Bilder …")
+        self.btn_batch.setToolTip("Die aktuellen Einstellungen auf viele Bilder anwenden "
+                                  "und alle auf einmal speichern.")
+        self.btn_batch.clicked.connect(self.batch)
+        rl.addWidget(self.btn_batch)
 
         split = QSplitter()
         split.addWidget(left)
@@ -294,6 +304,11 @@ class MainWindow(QMainWindow):
             tooltip="Anteil der dunkelsten Pixel, die ganz schwarz werden.")
         add(gl, "clip_white", "Weiß abschneiden", 0, 5, 0.05, 0.5, suffix=" %",
             tooltip="Anteil der hellsten Pixel, die ganz weiß werden.")
+        add(gl, "equalize", "Kontrastausgleich je Bildbereich", 0, 1, 0.01, 0.0,
+            decimals=0, suffix=" %", display_factor=100,
+            tooltip="Histogrammausgleich in einzelnen Bildbereichen mit weichen Übergängen "
+                    "(CLAHE / „Multidodging“). Holt Details aus flauen und dunklen Partien – "
+                    "das wichtigste Werkzeug für kontrastarme Weltkriegs-Luftbilder.")
         add(gl, "midtones", "Mitteltöne  (− dunkler / + heller)", -1, 1, 0.01, 0.0,
             decimals=0, display_factor=100,
             tooltip="Hellt die mittleren Grautöne auf oder dunkelt sie ab, "
@@ -319,6 +334,9 @@ class MainWindow(QMainWindow):
 
         g = QGroupBox("Bildfehler")
         gl = QVBoxLayout(g)
+        add(gl, "dust", "Staub & Kratzer entfernen", 0, 1, 0.01, 0.0, decimals=0,
+            suffix=" %", display_factor=100,
+            tooltip="Entfernt kleine helle oder dunkle Punkte und feine Kratzer vom Scan.")
         add(gl, "denoise", "Filmkorn reduzieren", 0, 1, 0.01, 0.0, decimals=0, suffix=" %",
             display_factor=100, tooltip="Glättet Korn und Rauschen, Kanten bleiben erhalten.")
         add(gl, "flatten", "Ausleuchtung ausgleichen", 0, 1, 0.01, 0.0, decimals=0,
@@ -358,7 +376,8 @@ class MainWindow(QMainWindow):
         act("Bilder öffnen…", self.open_files, QKeySequence.Open, m_file, True)
         self.a_export = act("Bild speichern…", self.export_current, QKeySequence.Save,
                             m_file, True)
-        self.a_export_all = act("Alle Bilder speichern…", self.export_all, None, m_file)
+        self.a_export_all = act("Stapelverarbeitung…", self.batch, QKeySequence("Ctrl+B"),
+                                m_file)
         m_file.addSeparator()
         self.a_close = act("Bild aus Liste entfernen", self.close_current, None, m_file)
         m_file.addSeparator()
@@ -455,13 +474,10 @@ class MainWindow(QMainWindow):
             base = kind[6:]
             if base in self._busy:
                 self._busy[base] = False
-            if base in ("load", "export"):
-                QApplication.restoreOverrideCursor()
-                if self._progress:
-                    self._progress.close()
-                    self._progress = None
-                QMessageBox.critical(self, "Fehler", f"{res}")
+            if base in ("load", "export", "batch"):
+                self._close_progress()
                 self.statusBar().clearMessage()
+            self._show_error(base, res)
             return
         if kind in self._busy:
             self._busy[kind] = False
@@ -470,7 +486,21 @@ class MainWindow(QMainWindow):
                 (self._render_preview if kind == "preview" else self._render_detail)()
         if gen != self._gen.get(kind):
             return  # veraltet
-        getattr(self, "_done_" + kind)(res)
+        try:
+            getattr(self, "_done_" + kind)(res)
+        except Exception as exc:
+            log.exception("Fehler beim Anzeigen von '%s'", kind)
+            self._show_error(kind, exc)
+
+    def _show_error(self, kind, exc):
+        names = {"load": "Laden", "export": "Speichern", "batch": "Stapelverarbeitung",
+                 "preview": "Vorschau", "detail": "Detailansicht", "thumbs": "Vorschaubilder"}
+        text = f"Fehler bei {names.get(kind, kind)}: {type(exc).__name__}: {exc}"
+        self.statusBar().showMessage(text, 30000)
+        if kind not in self._errors_shown:  # jede Fehlerart nur einmal als Fenster
+            self._errors_shown.add(kind)
+            QMessageBox.critical(
+                self, "Fehler", f"{text}\n\nDetails stehen in der Protokolldatei:\n{LOG_FILE}")
 
     def _done_load(self, res):
         QApplication.restoreOverrideCursor()
@@ -512,12 +542,12 @@ class MainWindow(QMainWindow):
 
         def job():
             prep = doc.prepare(s)
-            levels = P.compute_levels(prep, s)
+            glob = P.compute_globals(prep, s)
             scale = min(1.0, PREVIEW_LONG_SIDE / prep.long_side)
-            img = P.render(prep, s, None, scale, levels)
+            img = P.render(prep, s, None, scale, glob)
             return dict(qimg=gray_qimage(P.to_uint(img, 8)), size=prep.size, scale=scale,
                         before=P.histogram(prep.stats), after=P.histogram(img),
-                        levels=levels)
+                        levels=glob.levels)
 
         self._submit("preview", job)
         self._t_detail.start(0)
@@ -556,8 +586,8 @@ class MainWindow(QMainWindow):
 
         def job():
             prep = doc.prepare(s)
-            levels = P.compute_levels(prep, s)
-            img = P.render(prep, s, (x, y, w, h), scale, levels)
+            glob = P.compute_globals(prep, s)
+            img = P.render(prep, s, (x, y, w, h), scale, glob)
             return dict(qimg=gray_qimage(P.to_uint(img, 8)), x=x, y=y,
                         scale=img.shape[1] / w, geometry=(s.rotation, s.crop))
 
@@ -656,8 +686,8 @@ class MainWindow(QMainWindow):
 
     def _update_enabled(self):
         has = self.doc is not None
-        for w in (self.tabs, self.btn_export, self.btn_save_preset, self.preset_list,
-                  self.btn_before):
+        for w in (self.tabs, self.btn_export, self.btn_batch, self.btn_save_preset,
+                  self.preset_list, self.btn_before):
             w.setEnabled(has)
         for a in (self.a_export, self.a_export_all, self.a_apply_all, self.a_close):
             a.setEnabled(has)
@@ -813,6 +843,8 @@ class MainWindow(QMainWindow):
         values = self._all_presets().get(item.data(Qt.UserRole))
         if values is not None and self.entry:
             self._apply_tonal(values)
+            if self.tabs.currentIndex() != 1:
+                self.tabs.setCurrentIndex(1)  # Ergebnis sofort sichtbar machen
             item.setSelected(True)
             self._update_enabled()
 
@@ -857,13 +889,6 @@ class MainWindow(QMainWindow):
             "(Zuschnitt bleibt je Bild erhalten).", 6000)
 
     # ================================================================ Speichern
-    def _ask_format(self, title):
-        names = [v[0] for v in P.EXPORT_FORMATS.values()]
-        name, ok = QInputDialog.getItem(self, title, "Dateiformat:", names, 0, False)
-        if not ok:
-            return None
-        return next(k for k, v in P.EXPORT_FORMATS.items() if v[0] == name)
-
     def export_current(self):
         if not self.doc:
             return
@@ -888,52 +913,81 @@ class MainWindow(QMainWindow):
 
         self._submit("export", job)
 
-    def export_all(self):
-        if not self.entries:
+    def batch(self):
+        if not self.entry:
             return
         self._commit_history()
-        folder = QFileDialog.getExistingDirectory(self, "Zielordner wählen",
-                                                  os.path.dirname(self.entry.path))
-        if not folder:
+        from .batch import BatchDialog, run_batch
+        others = [e.path for e in self.entries if e is not self.entry]
+        dlg = BatchDialog(self, os.path.basename(self.entry.path), others,
+                          os.path.dirname(self.entry.path))
+        if dlg.exec() != BatchDialog.Accepted:
             return
-        fmt = self._ask_format("Alle Bilder speichern")
-        if not fmt:
-            return
-        ext = P.EXPORT_FORMATS[fmt][1]
-        jobs = [(e.path, e.settings) for e in self.entries]
-        current = self.doc
-        self._start_progress(f"{len(jobs)} Bilder werden gespeichert …")
-        sig = self.sig
+        job = dlg.job()
+        settings, current = self.entry.settings, self.doc
+        # Einstellungen auch für die Bilder in der Liste übernehmen
+        for e in self.entries:
+            if e is not self.entry and e.path in job.files:
+                e.settings = settings if job.use_geometry else P.with_tonal(
+                    e.settings, P.tonal_dict(settings))
+                del e.history[e.hist_idx + 1:]
+                e.history.append(e.settings)
+                e.hist_idx = len(e.history) - 1
+        self._start_progress(f"{len(job.files)} Bilder werden bearbeitet …", cancel=True)
+        sig, dlg_ref = self.sig, self._progress
+        self._batch_cancel = False
 
-        def job():
-            written = []
-            for i, (src, s) in enumerate(jobs):
-                doc = current if current and current.path == src else P.Document.open(src)
-                stem = os.path.splitext(os.path.basename(src))[0]
-                out = os.path.join(folder, stem + "_bearbeitet" + ext)
-                P.export(doc, s, out, fmt)
-                written.append(out)
-                sig.progress.emit(i + 1, len(jobs))
-            return written
+        def job_fn():
+            return run_batch(job, settings,
+                             progress=lambda i, n: sig.progress.emit(i, n),
+                             cancelled=lambda: self._batch_cancel, current_doc=current)
 
-        self._submit("export", job)
+        self._submit("batch", job_fn)
 
-    def _start_progress(self, text):
-        self._progress = QProgressDialog(text, None, 0, 100, self)
-        self._progress.setWindowTitle("Speichern")
+    def _done_batch(self, res):
+        written, errors = res
+        self._close_progress()
+        text = f"{len(written)} Bilder gespeichert."
+        if self._batch_cancel:
+            text += " (abgebrochen)"
+        if written:
+            text += f"\nZielordner: {os.path.dirname(written[0])}"
+        if errors:
+            text += "\n\nNicht bearbeitet:\n" + "\n".join(
+                f"• {os.path.basename(p)}: {e}" for p, e in errors[:15])
+            QMessageBox.warning(self, "Stapelverarbeitung", text)
+        else:
+            QMessageBox.information(self, "Stapelverarbeitung", text)
+
+    def _start_progress(self, text, cancel=False):
+        self._progress = QProgressDialog(text, "Abbrechen" if cancel else None, 0, 100, self)
+        self._progress.setWindowTitle("Bitte warten")
         self._progress.setWindowModality(Qt.WindowModal)
         self._progress.setMinimumDuration(0)
+        self._progress.setAutoClose(False)
+        self._progress.setAutoReset(False)
+        if cancel:
+            self._progress.canceled.connect(self._cancel_batch)
         self._progress.setValue(0)
         QApplication.setOverrideCursor(Qt.WaitCursor)
+
+    def _cancel_batch(self):
+        self._batch_cancel = True
+        if self._progress:
+            self._progress.setLabelText("Wird nach dem aktuellen Bild abgebrochen …")
+            self._progress.show()
+
+    def _close_progress(self):
+        QApplication.restoreOverrideCursor()
+        if self._progress:
+            self._progress.close()
+            self._progress = None
 
     def _on_progress(self, i, n):
         if self._progress:
             self._progress.setValue(int(100 * i / max(n, 1)))
 
     def _done_export(self, paths):
-        QApplication.restoreOverrideCursor()
-        if self._progress:
-            self._progress.close()
-            self._progress = None
+        self._close_progress()
         msg = paths[0] if len(paths) == 1 else f"{len(paths)} Bilder in {os.path.dirname(paths[0])}"
         self.statusBar().showMessage(f"Gespeichert: {msg}", 10000)
