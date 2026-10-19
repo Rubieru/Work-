@@ -16,7 +16,8 @@ from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QButtonGroup, QCh
                                QComboBox,
                                QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
                                QInputDialog, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QMainWindow, QMessageBox, QProgressDialog,
+                               QListWidgetItem, QMainWindow, QMenuBar, QMessageBox,
+                               QProgressDialog,
                                QPushButton, QScrollArea, QSpinBox, QSplitter,
                                QStackedWidget, QTabWidget, QToolButton, QVBoxLayout,
                                QWidget)
@@ -32,8 +33,6 @@ CROP_DISPLAY_LONG_SIDE = 4096
 log = logging.getLogger("luftbild_editor")
 LOG_FILE = ""
 THUMB_LONG_SIDE = 128
-MODE_STYLE = (f"QPushButton:checked {{ background: {theme.ACCENT}; color: {theme.ACCENT_TEXT}; "
-              "font-weight: bold; }")
 IMAGE_FILTER = "Bilder (*.tif *.tiff *.png *.jpg *.jpeg *.bmp *.jp2);;Alle Dateien (*)"
 
 
@@ -128,19 +127,50 @@ class MainWindow(QMainWindow):
         return t
 
     # ================================================================ UI
+    def _build_header(self):
+        """Kopfzeile im Stil der Website: Logo, Firmenname, Programmname, Menü."""
+        box = QWidget()
+        box.setObjectName("header")
+        box.setStyleSheet(f"QWidget#header {{ background: {theme.BASE}; }}")
+        v = QVBoxLayout(box)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        row = QHBoxLayout()
+        row.setContentsMargins(14, 8, 14, 6)
+        if theme.logo_path():
+            logo = QLabel()
+            logo.setPixmap(QPixmap(theme.logo_path()).scaled(
+                52, 52, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            row.addWidget(logo)
+            row.addSpacing(10)
+        titles = QVBoxLayout()
+        titles.setSpacing(0)
+        company = QLabel(theme.COMPANY)
+        company.setStyleSheet(f"color: {theme.ACCENT}; font-size: 22px; font-weight: bold; "
+                              "font-style: italic;")
+        sub = QLabel(theme.SUBTITLE + " – Zuschneiden, Kontrast und Schärfe "
+                     "für historische Luftbilder")
+        sub.setStyleSheet(f"color: {theme.GREY_TEXT}; font-size: 13px; font-weight: bold; "
+                          "font-style: italic;")
+        titles.addWidget(company)
+        titles.addWidget(sub)
+        row.addLayout(titles)
+        row.addStretch(1)
+        v.addLayout(row)
+        stripe = QWidget()
+        stripe.setFixedHeight(4)
+        stripe.setStyleSheet(f"background: {theme.ACCENT};")
+        v.addWidget(stripe)
+        self._menubar = QMenuBar()
+        v.addWidget(self._menubar)
+        self.setMenuWidget(box)
+
     def _build_ui(self):
+        self._build_header()
         # ---- links: Bilder + Voreinstellungen
         left = QWidget()
         ll = QVBoxLayout(left)
         ll.setContentsMargins(6, 6, 6, 6)
-        if theme.logo_path():
-            logo = QLabel()
-            pm = QPixmap(theme.logo_path())
-            logo.setPixmap(pm.scaledToHeight(min(pm.height(), 56), Qt.SmoothTransformation))
-            logo.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            logo.setToolTip(theme.APP_NAME)
-            ll.addWidget(logo)
-            ll.addSpacing(6)
         ll.addWidget(self._heading("Bilder"))
         self.image_list = QListWidget()
         self.image_list.setMaximumHeight(170)
@@ -154,7 +184,7 @@ class MainWindow(QMainWindow):
         ll.addWidget(self._heading("Voreinstellungen"))
         hint = QLabel("Anklicken zum Ausprobieren – die Vorschau zeigt Ihr Bild.")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: #aaa;")
+        hint.setObjectName("hint")
         ll.addWidget(hint)
         self.preset_list = QListWidget()
         self.preset_list.setViewMode(QListWidget.IconMode)
@@ -182,7 +212,8 @@ class MainWindow(QMainWindow):
         self.view.pixelHovered.connect(self._on_hover)
         empty = QLabel("Luftbild hierher ziehen\noder „Bilder öffnen…“ klicken")
         empty.setAlignment(Qt.AlignCenter)
-        empty.setStyleSheet("color: #888; font-size: 20px;")
+        empty.setStyleSheet(f"color: #c9d3d1; font-size: 20px; "
+                            f"background: {theme.VIEW_BACKGROUND};")
         self.center = QStackedWidget()
         self.center.addWidget(empty)
         self.center.addWidget(self.view)
@@ -198,10 +229,7 @@ class MainWindow(QMainWindow):
         rl.addWidget(self.tabs, 1)
         self.btn_export = QPushButton("3  Bild speichern…")
         self.btn_export.setMinimumHeight(40)
-        self.btn_export.setStyleSheet(
-            f"QPushButton {{ background: {theme.ACCENT}; color: {theme.ACCENT_TEXT}; "
-            "font-weight: bold; border-radius: 4px; }"
-            "QPushButton:disabled { background: #555; color: #888; }")
+        self.btn_export.setObjectName("primary")
         self.btn_export.clicked.connect(self.export_current)
         rl.addWidget(self.btn_export)
         self.btn_batch = QPushButton("Stapelverarbeitung (mehrere Bilder) …")
@@ -239,7 +267,7 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _heading(text):
         lbl = QLabel(text)
-        lbl.setStyleSheet("font-weight: bold; font-size: 14px;")
+        lbl.setObjectName("heading")
         return lbl
 
     @staticmethod
@@ -253,7 +281,7 @@ class MainWindow(QMainWindow):
     def _info(self, text):
         lbl = QLabel(text)
         lbl.setWordWrap(True)
-        lbl.setStyleSheet("color: #aaa;")
+        lbl.setObjectName("hint")
         return lbl
 
     def _build_crop_tab(self):
@@ -329,8 +357,8 @@ class MainWindow(QMainWindow):
             group.addButton(b)
             row.addWidget(b)
         group.setExclusive(True)
-        self.btn_simple.setStyleSheet(MODE_STYLE)
-        self.btn_adv.setStyleSheet(MODE_STYLE)
+        self.btn_simple.setObjectName("mode")
+        self.btn_adv.setObjectName("mode")
         lay.addLayout(row)
 
         # ---- Einfach: drei Regler
@@ -453,10 +481,11 @@ class MainWindow(QMainWindow):
         tb = self.addToolBar("Werkzeuge")
         tb.setMovable(False)
         tb.setToolButtonStyle(Qt.ToolButtonTextOnly)
-        m_file = self.menuBar().addMenu("&Datei")
-        m_edit = self.menuBar().addMenu("&Bearbeiten")
-        m_view = self.menuBar().addMenu("&Ansicht")
-        m_help = self.menuBar().addMenu("&Hilfe")
+        mb = self._menubar
+        m_file = mb.addMenu("&Datei")
+        m_edit = mb.addMenu("&Bearbeiten")
+        m_view = mb.addMenu("&Ansicht")
+        m_help = mb.addMenu("&Hilfe")
         a_log = QAction("Protokoll-Ordner öffnen", self)
         a_log.triggered.connect(lambda: QDesktopServices.openUrl(
             QUrl.fromLocalFile(os.path.dirname(LOG_FILE) if LOG_FILE else theme.log_dir())))

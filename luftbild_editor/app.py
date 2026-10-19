@@ -14,21 +14,30 @@ from . import main_window as mw
 from . import theme
 
 
-def dark_palette() -> QPalette:
+def app_palette() -> QPalette:
     p = QPalette()
     base, window, text = QColor(theme.BASE), QColor(theme.WINDOW), QColor(theme.TEXT)
     for role, color in ((QPalette.Window, window), (QPalette.WindowText, text),
                         (QPalette.Base, base), (QPalette.AlternateBase, window),
-                        (QPalette.ToolTipBase, QColor(25, 25, 25)),
-                        (QPalette.ToolTipText, text), (QPalette.Text, text),
-                        (QPalette.Button, window), (QPalette.ButtonText, text),
+                        (QPalette.ToolTipBase, base), (QPalette.ToolTipText, text),
+                        (QPalette.Text, text), (QPalette.Button, base),
+                        (QPalette.ButtonText, text),
                         (QPalette.Highlight, QColor(theme.ACCENT)),
                         (QPalette.HighlightedText, QColor(theme.ACCENT_TEXT)),
-                        (QPalette.PlaceholderText, QColor(130, 130, 130))):
+                        (QPalette.PlaceholderText, QColor(theme.MUTED))):
         p.setColor(role, color)
     for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
-        p.setColor(QPalette.Disabled, role, QColor(120, 120, 120))
+        p.setColor(QPalette.Disabled, role, QColor("#a0a8a7"))
     return p
+
+
+dark_palette = app_palette  # alter Name (Tests, Skripte)
+
+
+def apply_style(app) -> None:
+    app.setStyle("Fusion")
+    app.setPalette(app_palette())
+    app.setStyleSheet(theme.stylesheet())
 
 
 def setup_logging() -> str:
@@ -148,8 +157,7 @@ def main(argv=None) -> int:
     app.setApplicationDisplayName(theme.APP_NAME)
     if theme.logo_path():
         app.setWindowIcon(QIcon(theme.logo_path()))
-    app.setStyle("Fusion")
-    app.setPalette(dark_palette())
+    apply_style(app)
     log_path = setup_logging()
     logging.getLogger("luftbild_editor").info("Start Version %s, Protokoll %s",
                                               __version__, log_path)

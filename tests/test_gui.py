@@ -24,10 +24,10 @@ def wait(app, ms=300):
 
 @pytest.fixture(scope="module")
 def app():
-    from luftbild_editor.app import dark_palette
+    from luftbild_editor.app import app_palette
     a = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     a.setStyle("Fusion")
-    a.setPalette(dark_palette())
+    a.setPalette(app_palette())
     return a
 
 

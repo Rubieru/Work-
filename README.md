@@ -65,7 +65,7 @@ rechnet das Programm in voller Auflösung, und zwar so, dass Vorschau und Ergebn
 
 **Fehlerprotokoll:** `%APPDATA%\Luftbild-Editor\protokoll.txt`, erreichbar über *Hilfe → Protokoll-Ordner öffnen*.
 
-**Logo und Farben:** Name, Farben und Logo stehen in `luftbild_editor/theme.py`. Das Logo liegt als `luftbild_editor/resources/logo.png`, daraus entsteht beim Bauen auch das Symbol der .exe.
+**Logo und Farben:** Das Design folgt der Website von Plan-Zentrum Umwelt (Türkis #009D88). Name und Farben stehen in `luftbild_editor/theme.py`. Das Logo wird aus der Shape-Datei `tools/logo/pzulogo.shp` gezeichnet (`python tools/render_logo.py`) und liegt als `luftbild_editor/resources/logo.png`. Daraus entsteht beim Bauen auch das Symbol der .exe.
 
 ## Installation unter Windows
 
