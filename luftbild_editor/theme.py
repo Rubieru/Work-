@@ -35,6 +35,12 @@ def logo_path() -> str | None:
     return LOGO_PNG if os.path.exists(LOGO_PNG) else None
 
 
+def icon_path() -> str | None:
+    """Programmsymbol: .ico mit vereinfachter Kleinversion (beim Bauen erzeugt), sonst PNG."""
+    ico = os.path.join(RESOURCES, "logo.ico")
+    return ico if os.path.exists(ico) else logo_path()
+
+
 def log_dir() -> str:
     """Ordner für das Protokoll: %APPDATA%\\Luftbild-Editor (Windows)."""
     base = os.environ.get("APPDATA") or os.path.expanduser("~/.config")

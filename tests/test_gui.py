@@ -112,7 +112,7 @@ def test_batch(tmp_path):
         P.save_image(str(p), P.to_uint(synthetic_aerial(400 + 10 * i, 300, seed=i), 8), "tif8")
         files.append(str(p))
     files.append(str(tmp_path / "fehlt.tif"))
-    s = P.with_tonal(P.Settings(crop=(10, 10, 200, 150)), BUILTIN_PRESETS["Standard (ausgewogen)"])
+    s = P.with_tonal(P.Settings(crop=(10, 10, 200, 150)), BUILTIN_PRESETS["Standard (Bachelorarbeit)"])
     out = tmp_path / "aus"
     written, errors = run_batch(BatchJob(files, str(out), "png", "_b", False), s)
     assert len(written) == 3 and len(errors) == 1
@@ -140,10 +140,10 @@ def test_simple_mode_sliders(app, tmp_path, monkeypatch):
     win.simple_sliders["sharpness"].valueChanged.emit(0.5)
     win.simple_sliders["brightness"].valueChanged.emit(0.2)
     s = win.entry.settings
-    assert s.stretch and s.equalize == pytest.approx(0.35)
+    assert s.stretch and s.hist_flat == pytest.approx(0.5)
     assert s.sharpen_amount == pytest.approx(0.8) and s.midtones == pytest.approx(0.2)
     # Erweiterte Regler zeigen dieselben Werte
-    assert win.sliders["equalize"].value() == pytest.approx(0.35)
+    assert win.sliders["hist_flat"].value() == pytest.approx(0.5)
     # Voreinstellung aktualisiert die einfachen Regler
     win._apply_preset_item(win.preset_list.item(0))
     assert win.simple_sliders["contrast"].value() == 0

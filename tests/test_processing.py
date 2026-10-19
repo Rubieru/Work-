@@ -1,4 +1,5 @@
 import numpy as np
+from dataclasses import replace
 import pytest
 
 from luftbild_editor import processing as P
@@ -80,7 +81,7 @@ def test_rotation_keeps_canvas():
 
 def test_save_and_load_roundtrip(tmp_path):
     doc = make_doc()
-    s = P.with_tonal(P.Settings(crop=(0, 0, 300, 200)), BUILTIN_PRESETS["Standard (ausgewogen)"])
+    s = P.with_tonal(P.Settings(crop=(0, 0, 300, 200)), BUILTIN_PRESETS["Standard (Bachelorarbeit)"])
     for fmt, (_, ext) in P.EXPORT_FORMATS.items():
         path = str(tmp_path / f"Luftbild_ä_{fmt}{ext}")
         P.export(doc, s, path, fmt)
@@ -147,4 +148,49 @@ def test_auto_preset_values():
     doc = make_doc()
     assert preset_values(AUTO) is None
     v = preset_values(AUTO, doc.prepare(P.Settings()))
-    assert v["stretch"] and 0.15 <= v["equalize"] <= 0.7
+    assert v["stretch"] and 0.5 <= v["hist_flat"] <= 0.95 and v["stats_center"]
+
+
+def test_histogram_accepts_large_1d_samples():
+    h = P.histogram(np.random.default_rng(0).random(3_000_000).astype(np.float32))
+    assert h.sum() > 0 and len(h) == 256
+
+
+def test_frame_mask_ignores_black_scan_frame():
+    from tests.sample import synthetic_aerial
+    img = synthetic_aerial(900, 700)[60:-60, 60:-60].copy()
+    img = np.pad(img, 60, constant_values=0.02)        # schwarzer Scanrahmen
+    img[10:30, 300:380] = 0.95                         # weiße Bildnummer im Rahmen
+    valid = P.frame_mask(img)
+    assert not valid[20, 340] and not valid[5, 5]      # Rahmen + Beschriftung
+    assert valid[350, 450]                             # Bildinhalt
+    assert 0.6 < valid.mean() < 0.9
+
+
+def test_flatten_makes_histogram_flatter():
+    from tests.sample import synthetic_aerial
+    img = 0.4 + 0.2 * synthetic_aerial(800, 600)[50:-50, 50:-50]
+    doc = P.Document(P.LoadedImage(img.astype(np.float32), 16, None))
+    prep = doc.prepare(P.Settings())
+
+    def peak(s):
+        o = P.render(prep, s)
+        h, _ = np.histogram(o, bins=64, range=(0, 1))
+        return np.convolve(h / h.sum(), np.ones(16), "valid").max()
+
+    base = P.Settings(stretch=True, clip_black=0.1, clip_white=0.05)
+    assert peak(replace(base, hist_flat=0.9, hist_mode="gleichmaessig")) < peak(base) - 0.05
+    assert peak(replace(base, hist_flat=0.8, hist_mode="glocke")) < peak(base)
+
+
+def test_curve_lut_is_monotone_and_hits_points():
+    lut = P.curve_lut(((0.25, 0.4), (0.75, 0.8)), 1001)
+    assert abs(lut[250] - 0.4) < 1e-3 and abs(lut[750] - 0.8) < 1e-3
+    assert np.all(np.diff(lut) >= -1e-6)
+    s = P.Settings(curve=((0.5, 0.7),))
+    assert P.settings_from_json(P.settings_to_json(s)) == s
+
+
+def test_nodata_safe_output_has_no_zero():
+    out = P.to_uint(np.array([[0.0, 0.5, 1.0]], np.float32), 8, nodata_safe=True)
+    assert out.min() == 1 and out.max() == 255

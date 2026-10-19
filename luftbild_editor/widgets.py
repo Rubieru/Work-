@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap, QTransform
+from PySide6.QtGui import (QColor, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
+                           QTransform)
 from PySide6.QtWidgets import (QDoubleSpinBox, QGraphicsPixmapItem, QGraphicsScene,
                                QGraphicsView, QHBoxLayout, QLabel, QSlider, QVBoxLayout,
                                QWidget)
@@ -86,48 +87,201 @@ class LabeledSlider(QWidget):
 
 
 class HistogramWidget(QWidget):
-    """Histogramm vorher (grau) und nachher (gelb) mit Schwarz-/Weißpunkt."""
+    """Histogramm vorher und nachher, wie in Bildbearbeitungsprogrammen (linear).
+
+    Unter jedem Histogramm eine Graustufen-Leiste; rote Markierung, wenn Pixel bei
+    0 oder 255 anstoßen (Zeichnung verloren / NoData-Gefahr).
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(110)
+        self.setMinimumHeight(190)
         self._before = None
         self._after = None
         self._levels = (0.0, 1.0)
-        self.setToolTip("Grau: Helligkeitsverteilung des Originals\n"
-                        "Gelb: nach der Bearbeitung\n"
-                        "Striche: Schwarz- und Weißpunkt der Histogrammstreckung.\n"
-                        "Ein gut gestrecktes Bild nutzt die ganze Breite.")
+        self.setToolTip("Oben: Original, unten: bearbeitet (schwarzer Rand nicht mitgezählt).\n"
+                        "Ziel: breiter, flacher Verlauf über den ganzen Bereich, ohne Spitze\n"
+                        "und ohne Werte genau bei 0 (Schwarz) oder 255 (Weiß).")
 
     def set_data(self, before, after, levels):
         self._before, self._after, self._levels = before, after, levels
         self.update()
 
+    def _panel(self, p, r, data, title, levels=None):
+        p.fillRect(r, QColor(250, 250, 250))
+        p.setPen(QColor(190, 200, 198))
+        p.setBrush(Qt.NoBrush)
+        p.drawRect(r)
+        bar_h = 8
+        plot = r.adjusted(1, 16, -1, -bar_h - 2)
+        p.setPen(QColor(90, 100, 98))
+        p.drawText(r.adjusted(4, 1, -4, 0), Qt.AlignLeft | Qt.AlignTop, title)
+        if data is not None and data.sum() > 0:
+            d = data.astype(np.float64)
+            n = len(d)
+            # Höhe: 99,5-%-Wert statt Maximum, damit einzelne Spitzen nicht alles stauchen
+            top = max(np.percentile(d, 99.5), 1.0)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(70, 80, 78))
+            bw = plot.width() / n
+            for i, v in enumerate(d):
+                hgt = min(v / top, 1.0) * plot.height()
+                if hgt > 0:
+                    p.drawRect(QRectF(plot.left() + i * bw, plot.bottom() - hgt,
+                                      max(bw, 1.0), hgt))
+            total = d.sum()
+            lo_pct = d[0] / total * 100
+            hi_pct = d[-1] / total * 100
+            p.setPen(QColor(200, 40, 40))
+            for pct, x, al in ((lo_pct, plot.left() + 2, Qt.AlignLeft),
+                               (hi_pct, plot.right() - 2, Qt.AlignRight)):
+                if pct >= 0.05:
+                    p.fillRect(QRectF(x - 2 if al == Qt.AlignRight else x - 2, plot.top(), 3,
+                                      plot.height()), QColor(220, 40, 40))
+                    p.drawText(QRectF(plot.left() + 4, plot.top(), plot.width() - 8, 14),
+                               al | Qt.AlignTop, f"{pct:.1f} %")
+        if levels and levels != (0.0, 1.0):
+            p.setPen(QPen(ACCENT, 1, Qt.DashLine))
+            for v in levels:
+                x = plot.left() + plot.width() * min(max(v, 0), 1)
+                p.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()))
+        grad = QLinearGradient(r.left(), 0, r.right(), 0)
+        grad.setColorAt(0, QColor(0, 0, 0))
+        grad.setColorAt(1, QColor(255, 255, 255))
+        p.fillRect(QRectF(r.left() + 1, r.bottom() - bar_h, r.width() - 1, bar_h), grad)
+
     def paintEvent(self, _):
         p = QPainter(self)
+        r = self.rect().adjusted(0, 0, -1, -1)
+        half = r.height() // 2
+        self._panel(p, QRectF(r.left(), r.top(), r.width(), half - 3), self._before,
+                    "Original", self._levels)
+        self._panel(p, QRectF(r.left(), r.top() + half + 1, r.width(), half - 1), self._after,
+                    "Bearbeitet")
+        p.end()
+
+
+class CurveWidget(QWidget):
+    """Gradationskurve zum manuellen Nachbearbeiten des Histogramms.
+
+    Klick auf die Kurve setzt einen Punkt, Ziehen verschiebt ihn, Doppelklick oder
+    rechte Maustaste entfernt ihn. Im Hintergrund das aktuelle Histogramm.
+    """
+
+    curveChanged = Signal(tuple)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(220)
+        self.setMouseTracking(True)
+        self._points: list = []
+        self._hist = None
+        self._drag = None
+        self.setToolTip("Klicken: Punkt setzen · Ziehen: verschieben · Doppelklick oder "
+                        "rechte Maustaste: Punkt löschen.\nKurve nach oben = heller, "
+                        "S-Form = mehr Kontrast in den Mitteltönen.")
+
+    def set_points(self, points):
+        self._points = [tuple(p) for p in points]
+        self.update()
+
+    def set_histogram(self, hist):
+        self._hist = hist
+        self.update()
+
+    def _area(self):
+        return QRectF(self.rect()).adjusted(8, 8, -8, -8)
+
+    def _to_px(self, x, y):
+        a = self._area()
+        return QPointF(a.left() + x * a.width(), a.bottom() - y * a.height())
+
+    def _from_px(self, pos):
+        a = self._area()
+        return (min(max((pos.x() - a.left()) / a.width(), 0.0), 1.0),
+                min(max((a.bottom() - pos.y()) / a.height(), 0.0), 1.0))
+
+    def _nearest(self, pos, tol=10):
+        for i, (x, y) in enumerate(self._points):
+            if (self._to_px(x, y) - pos).manhattanLength() <= tol:
+                return i
+        return None
+
+    def mousePressEvent(self, e):
+        pos = e.position()
+        i = self._nearest(pos)
+        if e.button() == Qt.RightButton:
+            if i is not None:
+                self._points.pop(i)
+                self._emit()
+            return
+        if i is None:
+            x, y = self._from_px(pos)
+            if 0.01 < x < 0.99:
+                self._points.append((x, y))
+                self._points.sort()
+                i = self._points.index((x, y))
+                self._emit()
+        self._drag = i
+
+    def mouseDoubleClickEvent(self, e):
+        i = self._nearest(e.position())
+        if i is not None:
+            self._points.pop(i)
+            self._drag = None
+            self._emit()
+
+    def mouseMoveEvent(self, e):
+        if self._drag is None:
+            return
+        x, y = self._from_px(e.position())
+        x = min(max(x, 0.01), 0.99)
+        self._points[self._drag] = (x, y)
+        order = sorted(range(len(self._points)), key=lambda k: self._points[k][0])
+        self._points = [self._points[k] for k in order]
+        self._drag = order.index(self._drag)
+        self.update()
+        self._emit()
+
+    def mouseReleaseEvent(self, e):
+        self._drag = None
+
+    def _emit(self):
+        self.update()
+        self.curveChanged.emit(tuple((round(x, 4), round(y, 4)) for x, y in self._points))
+
+    def paintEvent(self, _):
+        from .processing import curve_lut
+        p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        r = self.rect().adjusted(1, 1, -1, -1)
-        p.fillRect(r, QColor(28, 28, 28))
-        p.setPen(QColor(70, 70, 70))
-        p.drawRect(r)
-        for data, color in ((self._before, QColor(150, 150, 150, 110)),
-                            (self._after, QColor(ACCENT.red(), ACCENT.green(), ACCENT.blue(), 150))):
-            if data is None or data.max() <= 0:
-                continue
-            d = np.sqrt(data / data.max())  # Wurzel: kleine Werte sichtbar
-            path = QPainterPath(QPointF(r.left(), r.bottom()))
-            n = len(d)
+        a = self._area()
+        p.fillRect(self.rect(), QColor(250, 250, 250))
+        p.setPen(QColor(220, 226, 225))
+        for i in range(1, 4):
+            p.drawLine(self._to_px(i / 4, 0), self._to_px(i / 4, 1))
+            p.drawLine(self._to_px(0, i / 4), self._to_px(1, i / 4))
+        if self._hist is not None and self._hist.sum() > 0:
+            d = self._hist / max(np.percentile(self._hist, 99.5), 1.0)
+            path = QPainterPath(self._to_px(0, 0))
             for i, v in enumerate(d):
-                path.lineTo(r.left() + r.width() * i / (n - 1), r.bottom() - v * (r.height() - 4))
-            path.lineTo(r.right(), r.bottom())
-            path.closeSubpath()
-            p.fillPath(path, color)
-        lo, hi = self._levels
-        if (lo, hi) != (0.0, 1.0):
-            p.setPen(QPen(QColor(230, 230, 230), 1, Qt.DashLine))
-            for v in (lo, hi):
-                x = r.left() + r.width() * min(max(v, 0), 1)
-                p.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()))
+                path.lineTo(self._to_px(i / (len(d) - 1), min(v, 1.0) * 0.9))
+            path.lineTo(self._to_px(1, 0))
+            p.fillPath(path, QColor(150, 160, 158, 110))
+        p.setPen(QPen(QColor(170, 175, 174), 1, Qt.DashLine))
+        p.drawLine(self._to_px(0, 0), self._to_px(1, 1))
+        lut = curve_lut(self._points, 256)
+        ys = lut if lut is not None else np.linspace(0, 1, 256)
+        path = QPainterPath(self._to_px(0, float(ys[0])))
+        for i in range(1, 256):
+            path.lineTo(self._to_px(i / 255, float(ys[i])))
+        p.setPen(QPen(ACCENT, 2))
+        p.drawPath(path)
+        p.setBrush(QColor(255, 255, 255))
+        for x, y in self._points:
+            p.drawEllipse(self._to_px(x, y), 5, 5)
+        p.setPen(QColor(190, 200, 198))
+        p.setBrush(Qt.NoBrush)
+        p.drawRect(a)
         p.end()
 
 

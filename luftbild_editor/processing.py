@@ -50,10 +50,13 @@ class Settings:
     stretch: bool = False          # Histogrammstreckung an/aus
     clip_black: float = 0.5        # % der dunkelsten Pixel, die schwarz werden
     clip_white: float = 0.5        # % der hellsten Pixel, die weiß werden
-    stats_center: bool = True      # Bildrand und schwarzen Scanrahmen nicht mitmessen
+    stats_center: bool = True      # schwarzen Scanrahmen, Beschriftung, Rand nicht mitmessen
     stretch_buffer: float = 0.0    # Puffer 0..0.3: Streckung weniger hart (Detailschutz)
     midtones: float = 0.0          # -1 (dunkler) .. +1 (heller)
     equalize: float = 0.0          # Kontrastausgleich je Bildbereich (CLAHE) 0..1
+    hist_flat: float = 0.0         # Histogramm abflachen (global) 0..1
+    hist_mode: str = "glocke"      # glocke | gleichmaessig | begrenzt
+    curve: tuple = ()              # Gradationskurve: ((x, y), ...) zwischen (0,0) und (1,1)
     clarity: float = 0.0           # lokaler Kontrast 0..1
 
     # Schärfen (Unscharf maskieren)
@@ -77,6 +80,8 @@ def tonal_dict(s: Settings) -> dict:
 
 def with_tonal(s: Settings, values: dict) -> Settings:
     clean = {k: v for k, v in values.items() if k in TONAL_FIELDS}
+    if "curve" in clean:
+        clean["curve"] = tuple(tuple(float(v) for v in p) for p in clean["curve"] or ())
     defaults = tonal_dict(Settings())
     defaults.update(clean)
     return replace(s, **defaults)
@@ -90,6 +95,7 @@ def neutral(s: Settings) -> Settings:
 def settings_to_json(s: Settings) -> dict:
     d = asdict(s)
     d["crop"] = list(s.crop) if s.crop else None
+    d["curve"] = [list(p) for p in s.curve]
     return d
 
 
@@ -98,6 +104,8 @@ def settings_from_json(d: dict) -> Settings:
     d = {k: v for k, v in d.items() if k in valid}
     if d.get("crop"):
         d["crop"] = tuple(int(v) for v in d["crop"])
+    if "curve" in d:
+        d["curve"] = tuple(tuple(float(v) for v in p) for p in d["curve"] or ())
     return Settings(**d)
 
 
@@ -428,6 +436,8 @@ class Globals:
     """Werte, die einmal für das ganze Bild berechnet und überall gleich angewendet werden."""
     levels: tuple = (0.0, 1.0)     # Schwarz-/Weißpunkt der Histogrammstreckung
     clahe: np.ndarray | None = None  # Kontrastausgleich-Tabellen (ny, nx, bins)
+    flat: np.ndarray | None = None   # Tabelle "Histogramm abflachen"
+    curve: np.ndarray | None = None  # Tabelle Gradationskurve
 
 
 CLAHE_TILES = 8       # Kacheln entlang der langen Bildseite
@@ -445,26 +455,66 @@ def _stats_tonal(prep: Prepared, s: Settings) -> np.ndarray:
     return st
 
 
-def compute_levels(prep: Prepared, s: Settings) -> tuple[float, float]:
-    """Schwarz- und Weißpunkt der Histogrammstreckung."""
-    if not s.stretch:
-        return 0.0, 1.0
-    st = _stats_tonal(prep, s)
-    raw = prep.stats
+def frame_mask(img: np.ndarray) -> np.ndarray:
+    """True = Bildinhalt, False = schwarzer Scanrahmen mit Beschriftung und Messmarken.
+
+    Der Rahmen ist dunkel, gleichmäßig und hängt mit dem Bildrand zusammen. Beschriftungen
+    und Messmarken im Rahmen werden durch ein morphologisches Schließen mit erfasst.
+    Dunkle Bildinhalte (Wald, Schatten) sind strukturiert und bleiben deshalb erhalten.
+    """
+    h, w = img.shape
+    small, sc = _resize_long(img.astype(np.float32), 1024)
+    sh, sw = small.shape
+    m = cv2.blur(small, (7, 7))
+    var = np.maximum(cv2.blur(small * small, (7, 7)) - m * m, 0)
+    cand = ((small < 0.08) & (np.sqrt(var) < 0.035)).astype(np.uint8)
+    n, labels = cv2.connectedComponents(cand, connectivity=8)
+    border = np.unique(np.concatenate([labels[0], labels[-1], labels[:, 0], labels[:, -1]]))
+    border = border[border > 0]
+    frame = np.isin(labels, border).astype(np.uint8)
+    k = max(3, int(0.03 * max(sh, sw)) | 1)
+    frame = cv2.morphologyEx(frame, cv2.MORPH_CLOSE,
+                             cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    d = max(3, int(0.006 * max(sh, sw)) | 1)
+    frame = cv2.dilate(frame, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (d, d)))
+    # schmaler Randstreifen zählt nie (Kanten des Scans)
+    b = max(1, int(0.01 * max(sh, sw)))
+    frame[:b] = frame[-b:] = 1
+    frame[:, :b] = frame[:, -b:] = 1
+    valid = frame == 0
+    if valid.mean() < 0.3:  # Erkennung unsicher -> nur Randstreifen weglassen
+        valid = np.ones_like(valid)
+        valid[:b] = valid[-b:] = False
+        valid[:, :b] = valid[:, -b:] = False
+    if sc < 1.0:
+        valid = cv2.resize(valid.astype(np.uint8), (w, h),
+                           interpolation=cv2.INTER_NEAREST).astype(bool)
+    return valid
+
+
+def stats_sample(prep: Prepared, s: Settings, values: np.ndarray | None = None) -> np.ndarray:
+    """Pixel für Histogramm und Streckung – ohne schwarzen Rand und ohne NoData (0)."""
+    st = prep.stats if values is None else values
     if s.stats_center:
-        # Bildrand ignorieren: einen schmalen Streifen (Messmarken, Beschriftung) und den
-        # schwarzen Scanrahmen. Ein breiter Rand wie im Gemini-Skript (25 %) würde bei
-        # Bildern mit hellem Zentrum dunkle Bereiche am Rand zu Schwarz strecken.
-        h, w = st.shape
-        my, mx = max(1, h // 25), max(1, w // 25)
-        st, raw = st[my:h - my, mx:w - mx], raw[my:h - my, mx:w - mx]
-        sample = st[raw > 3.0 / 255.0]  # schwarzer Rahmen / NoData
+        valid = prep.__dict__.get("_valid")
+        if valid is None:
+            valid = frame_mask(prep.stats)
+            prep.__dict__["_valid"] = valid
+        sample = st[valid & (prep.stats > 0)]
     else:
-        sample = st[raw > 0]  # Wert 0 = keine Daten (NoData) nicht mitzählen
+        sample = st[prep.stats > 0]
     if sample.size < 100:
         sample = st.ravel()
     if sample.size > 1_500_000:
         sample = sample[::2]
+    return sample
+
+
+def compute_levels(prep: Prepared, s: Settings) -> tuple[float, float]:
+    """Schwarz- und Weißpunkt der Histogrammstreckung (ohne Rahmen gemessen)."""
+    if not s.stretch:
+        return 0.0, 1.0
+    sample = stats_sample(prep, s, _stats_tonal(prep, s))
     lo, hi = np.percentile(sample, [s.clip_black, 100.0 - s.clip_white])
     lo, hi = float(lo), float(hi)
     if s.stretch_buffer > 0:
@@ -473,6 +523,81 @@ def compute_levels(prep: Prepared, s: Settings) -> tuple[float, float]:
     if hi - lo < 1e-4:
         hi = lo + 1e-4
     return lo, hi
+
+
+HIST_BINS = 1024
+HIST_MODES = {
+    "glocke": "Weich (Glockenform)",
+    "gleichmaessig": "Stark (gleichmäßig)",
+    "begrenzt": "Schonend (Spitze kappen)",
+}
+
+
+def _flatten_lut(sample: np.ndarray, mode: str) -> np.ndarray:
+    """Abbildung 0..1 -> 0..1, die das Histogramm abflacht (globaler Histogrammausgleich)."""
+    hist, _ = np.histogram(sample, bins=HIST_BINS, range=(0.0, 1.0))
+    hist = hist.astype(np.float64) + 1e-9
+    if mode == "begrenzt":  # Spitze kappen, Überschuss gleichmäßig verteilen
+        limit = 1.8 * hist.sum() / HIST_BINS
+        excess = np.maximum(hist - limit, 0).sum()
+        hist = np.minimum(hist, limit) + excess / HIST_BINS
+    cdf = np.cumsum(hist)
+    cdf = (cdf - cdf[0]) / max(cdf[-1] - cdf[0], 1e-12)
+    if mode == "glocke":
+        # auf eine breite Glockenkurve abbilden (Mittelwert 0,5, Streuung 0,3):
+        # flacher als das Original, aber ohne die Härte eines vollen Ausgleichs
+        from math import erf, sqrt
+        xs = np.linspace(0, 1, 2048)
+        sigma = 0.3
+        norm = np.array([0.5 * (1 + erf((x - 0.5) / (sigma * sqrt(2)))) for x in xs])
+        norm = (norm - norm[0]) / (norm[-1] - norm[0])
+        cdf = np.interp(cdf, norm, xs)
+    return cdf.astype(np.float32)
+
+
+def curve_lut(points, n: int = 1024) -> np.ndarray | None:
+    """Gradationskurve als Tabelle (monoton, glatt durch die Punkte)."""
+    if not points:
+        return None
+    pts = sorted({(0.0, 0.0), (1.0, 1.0), *((float(x), float(y)) for x, y in points)})
+    xs = np.array([p[0] for p in pts])
+    ys = np.array([p[1] for p in pts])
+    # monotone kubische Interpolation (Fritsch-Carlson)
+    dx = np.diff(xs)
+    dx[dx == 0] = 1e-9
+    dy = np.diff(ys)
+    m = dy / dx
+    tang = np.zeros_like(xs)
+    tang[0], tang[-1] = m[0], m[-1]
+    for i in range(1, len(xs) - 1):
+        tang[i] = 0.0 if m[i - 1] * m[i] <= 0 else (m[i - 1] + m[i]) / 2
+    for i in range(len(m)):
+        if m[i] == 0:
+            tang[i] = tang[i + 1] = 0
+        else:
+            a, b = tang[i] / m[i], tang[i + 1] / m[i]
+            r = a * a + b * b
+            if r > 9:
+                k = 3 / np.sqrt(r)
+                tang[i], tang[i + 1] = k * a * m[i], k * b * m[i]
+    x = np.linspace(0, 1, n)
+    idx = np.clip(np.searchsorted(xs, x) - 1, 0, len(xs) - 2)
+    h = dx[idx]
+    t_ = (x - xs[idx]) / h
+    h00 = 2 * t_ ** 3 - 3 * t_ ** 2 + 1
+    h10 = t_ ** 3 - 2 * t_ ** 2 + t_
+    h01 = -2 * t_ ** 3 + 3 * t_ ** 2
+    h11 = t_ ** 3 - t_ ** 2
+    y = h00 * ys[idx] + h10 * h * tang[idx] + h01 * ys[idx + 1] + h11 * h * tang[idx + 1]
+    return np.clip(y, 0, 1).astype(np.float32)
+
+
+def _apply_lut(img: np.ndarray, lut: np.ndarray) -> np.ndarray:
+    n = len(lut) - 1
+    v = np.clip(img, 0, 1) * n
+    i0 = np.minimum(v.astype(np.int32), n - 1)
+    f = v - i0
+    return (lut[i0] * (1 - f) + lut[i0 + 1] * f).astype(np.float32)
 
 
 def clahe_grid(w: int, h: int) -> tuple[int, int]:
@@ -508,12 +633,26 @@ def _clahe_tables(img: np.ndarray) -> np.ndarray:
 
 def compute_globals(prep: Prepared, s: Settings) -> Globals:
     levels = compute_levels(prep, s)
-    clahe = None
-    if s.equalize > 0:
+    clahe = flat = None
+    curve = curve_lut(s.curve)
+    if s.equalize > 0 or s.hist_flat > 0:
         st = _stats_tonal(prep, s)
         st = _levels_gamma(st.astype(np.float32, copy=True), s, levels)
-        clahe = _clahe_tables(st)
-    return Globals(levels, clahe)
+        if s.hist_flat > 0:
+            flat = _flatten_lut(stats_sample(prep, s, st), s.hist_mode)
+            st = _tone(st, s, flat, curve)
+        if s.equalize > 0:
+            clahe = _clahe_tables(st)
+    return Globals(levels, clahe, flat, curve)
+
+
+def _tone(img, s, flat, curve):
+    """Globale Tonwertkurven: Histogramm abflachen, dann Gradationskurve."""
+    if flat is not None:
+        img = img + s.hist_flat * (_apply_lut(img, flat) - img)
+    if curve is not None:
+        img = _apply_lut(img, curve)
+    return img
 
 
 def _levels_gamma(img: np.ndarray, s: Settings, levels) -> np.ndarray:
@@ -561,35 +700,27 @@ def _apply_clahe(img, tables, strength, base_w, base_h, x0, y0, scale):
 def auto_tonal(prep: Prepared) -> dict:
     """Misst das Bild und schlägt passende Regler-Werte vor ("Automatisch").
 
-    Funktioniert unabhängig vom Inhalt (Stadt, Wald, Wiesen, Wasser …):
-    - Helligkeit: Mitteltöne so, dass der Median etwa mittelgrau wird
-    - Kontrastausgleich: umso stärker, je flauer das Bild lokal ist
-    - Filmkorn: aus einem Ausschnitt in voller Auflösung geschätzt; danach richten
+    - Streckung auf den ganzen Grauwertbereich (schwarzer Rand zählt nicht)
+    - Histogramm abflachen: umso stärker, je spitzer das Histogramm ist
+    - Filmkorn wird aus einem Ausschnitt in voller Auflösung geschätzt; danach richten
       sich Körnungsfilter und Schärfe-Schwelle
     """
-    base = Settings(stretch=True, clip_black=0.2, clip_white=0.1, stats_center=True)
+    base = Settings(stretch=True, clip_black=0.1, clip_white=0.05, stats_center=True)
     lo, hi = compute_levels(prep, base)
-    st = prep.stats
-    h, w = st.shape
-    my, mx = max(1, h // 25), max(1, w // 25)
-    core = st[my:h - my, mx:w - mx]
-    valid = core[core > 3.0 / 255.0]
-    if valid.size < 100:
-        valid = core.ravel()
-    x = np.clip((valid - lo) / max(hi - lo, 1e-4), 0, 1)
+    sample = stats_sample(prep, base)
+    x = np.clip((sample - lo) / max(hi - lo, 1e-4), 0, 1)
 
-    # Helligkeit: Median sanft Richtung Mittelgrau ziehen. Helle Bilder (Flugfelder,
-    # Wiesen) nur wenig abdunkeln, dunkle (Wald, Schatten) stärker aufhellen.
+    # Spitzigkeit: Anteil der Pixel im dichtesten Viertel des Grauwertbereichs.
+    # Gleichverteilung = 0,25; ein schmaler Gipfel liegt deutlich darüber.
+    hist, _ = np.histogram(x, bins=64, range=(0, 1))
+    frac = hist / max(hist.sum(), 1)
+    window = np.convolve(frac, np.ones(16), mode="valid").max()
+    hist_flat = float(np.clip(0.5 + (window - 0.35) * 2.0, 0.5, 0.95))
+
+    # Helligkeit: die Glockenform zentriert ohnehin; nur bei sehr hellen/dunklen
+    # Bildern leicht nachhelfen
     med = float(np.clip(np.median(x), 0.05, 0.95))
-    gamma = np.log(0.5) / np.log(med)
-    midtones = -np.log(gamma) / np.log(3.0)
-    midtones = float(np.clip(midtones * (0.4 if midtones < 0 else 0.7), -0.15, 0.45))
-
-    # Lokaler Kontrast (Abweichung vom Umfeld, ~1 % der Bildgröße)
-    stretched = np.clip((core - lo) / max(hi - lo, 1e-4), 0, 1).astype(np.float32)
-    sigma = max(2.0, 0.01 * max(core.shape))
-    local = float(np.mean(np.abs(stretched - cv2.GaussianBlur(stretched, (0, 0), sigma))))
-    equalize = float(np.clip(0.75 - local * 6.0, 0.15, 0.7))
+    midtones = float(np.clip((0.5 - med) * 0.6, -0.15, 0.25))
 
     # Filmkorn: robuste Streuung gegenüber dem Median in einem Vollauflösungs-Ausschnitt
     H, W = prep.base.shape
@@ -598,19 +729,16 @@ def auto_tonal(prep: Prepared) -> dict:
     tile = as_float(prep.base[y0:y0 + t, x0:x0 + t]).astype(np.float32)
     tile = np.clip((tile - lo) / max(hi - lo, 1e-4), 0, 1).astype(np.float32)
     noise = float(1.4826 * np.median(np.abs(tile - cv2.medianBlur(tile, 3))))
-
     if noise > 0.03:
-        denoise, thr, amount, radius = 0.5, 0.025, 0.5, 1.4
+        denoise, thr, amount, radius = 0.4, 0.025, 0.5, 1.4
     elif noise > 0.015:
-        denoise, thr, amount, radius = 0.25, 0.015, 0.6, 1.2
+        denoise, thr, amount, radius = 0.2, 0.015, 0.55, 1.2
     else:
-        denoise, thr, amount, radius = 0.0, 0.008, 0.75, 1.0
-    if equalize > 0.5:  # viel Ausgleich verstärkt auch Korn
-        thr = max(thr, 0.012)
+        denoise, thr, amount, radius = 0.0, 0.008, 0.6, 1.0
     return {
-        "stretch": True, "clip_black": 0.2, "clip_white": 0.1, "stats_center": True,
-        "stretch_buffer": 0.02, "midtones": round(midtones, 2),
-        "equalize": round(equalize, 2), "denoise": denoise,
+        "stretch": True, "clip_black": 0.1, "clip_white": 0.05, "stats_center": True,
+        "hist_flat": round(hist_flat, 2), "hist_mode": "glocke",
+        "midtones": round(midtones, 2), "equalize": 0.1, "denoise": denoise,
         "sharpen_amount": amount, "sharpen_radius": radius, "sharpen_threshold": thr,
     }
 
@@ -656,6 +784,7 @@ def apply_tonal(img: np.ndarray, prep: Prepared, s: Settings, glob: Globals,
             img = cv2.bilateralFilter(img, 0, max(sigma_color, 1e-3), sigma_space)
 
     img = _levels_gamma(img, s, glob.levels)
+    img = _tone(img, s, glob.flat, glob.curve)
 
     if s.equalize > 0 and glob.clahe is not None:
         W, H = prep.size
@@ -787,7 +916,10 @@ def export(doc: Document, s: Settings, path: str, fmt: str, progress=None,
 
 
 def histogram(img: np.ndarray, bins: int = 256) -> np.ndarray:
-    sample = img[::2, ::2] if img.size > 2_000_000 else img
+    if img.size > 2_000_000:
+        sample = img[::2, ::2] if img.ndim == 2 else img[::4]
+    else:
+        sample = img
     h, _ = np.histogram(sample, bins=bins, range=(0.0, 1.0))
     return h.astype(np.float64)
 

@@ -26,7 +26,7 @@ from . import __version__
 from . import processing as P
 from . import theme
 from .presets import AUTO, BUILTIN_PRESETS, load_user_presets, save_user_presets
-from .widgets import HistogramWidget, ImageView, LabeledSlider
+from .widgets import CurveWidget, HistogramWidget, ImageView, LabeledSlider
 
 PREVIEW_LONG_SIDE = 2000
 CROP_DISPLAY_LONG_SIDE = 4096
@@ -241,12 +241,12 @@ class MainWindow(QMainWindow):
                                   "und alle auf einmal speichern.")
         self.btn_batch.clicked.connect(self.batch)
         rl.addWidget(self.btn_batch)
-        self.chk_nodata = QCheckBox("Für GIS: Pixelwert 0 vermeiden (NoData-sicher)")
+        self.chk_nodata = QCheckBox("Grauwerte 1–255 (kein Wert 0 – für Photogrammetrie/GIS)")
         self.chk_nodata.setToolTip(
             "Schwarz wird als 1 statt 0 gespeichert. Viele GIS-Programme werten 0 als "
             "„keine Daten“ und würden dunkle Bildstellen sonst durchsichtig darstellen.")
         self.chk_nodata.setChecked(
-            QSettings().value("nodata_safe", False, type=bool))
+            QSettings().value("nodata_safe", True, type=bool))
         self.chk_nodata.toggled.connect(lambda v: QSettings().setValue("nodata_safe", v))
         rl.addWidget(self.chk_nodata)
 
@@ -433,6 +433,21 @@ class MainWindow(QMainWindow):
             "Die wichtigste Verbesserung für flaue historische Luftbilder.")
         self.chk_stretch.toggled.connect(lambda v: self._set_value("stretch", v))
         gl.addWidget(self.chk_stretch)
+        add(gl, "hist_flat", "Histogramm abflachen", 0, 1, 0.01, 0.0, decimals=0,
+            suffix=" %", display_factor=100,
+            tooltip="Verteilt die Grauwerte breiter über den ganzen Bereich und flacht die "
+                    "Spitze im Histogramm ab (globaler Histogrammausgleich).")
+        self.flat_mode = QComboBox()
+        for key, label in P.HIST_MODES.items():
+            self.flat_mode.addItem(label, key)
+        self.flat_mode.setToolTip(
+            "Weich: Glockenform, flacher als das Original – passt für die meisten Bilder.\n"
+            "Stark: annähernd gleich viele Pixel je Grauwert – maximaler Kontrast.\n"
+            "Schonend: nur die Spitze wird gekappt – für Bilder mit großen gleichmäßigen "
+            "Flächen (Wasser, Wiesen).")
+        self.flat_mode.currentIndexChanged.connect(
+            lambda _: self._set_value("hist_mode", self.flat_mode.currentData()))
+        gl.addWidget(self.flat_mode)
         add(gl, "clip_black", "Schwarz abschneiden", 0, 5, 0.05, 0.5, suffix=" %",
             tooltip="Anteil der dunkelsten Pixel, die ganz schwarz werden.")
         add(gl, "clip_white", "Weiß abschneiden", 0, 5, 0.05, 0.5, suffix=" %",
@@ -441,10 +456,10 @@ class MainWindow(QMainWindow):
             suffix=" %", display_factor=100,
             tooltip="Streckt etwas weniger hart, damit in sehr hellen und sehr dunklen "
                     "Bereichen keine Details verloren gehen (Gemini-Skript: 10 %).")
-        self.chk_center = QCheckBox("Bildrand nicht mitmessen")
+        self.chk_center = QCheckBox("Schwarzen Rand und Beschriftung nicht mitzählen")
         self.chk_center.setToolTip(
-            "Der schwarze Scanrahmen und ein schmaler Randstreifen (Messmarken, "
-            "Bildnummer) werden bei der Streckung ignoriert.")
+            "Der schwarze Scanrahmen mit Messmarken und Bildnummer wird erkannt und für "
+            "Histogramm und Streckung ignoriert.")
         self.chk_center.toggled.connect(lambda v: self._set_value("stats_center", v))
         gl.addWidget(self.chk_center)
         add(gl, "equalize", "Kontrastausgleich je Bildbereich", 0, 1, 0.01, 0.0,
@@ -460,6 +475,16 @@ class MainWindow(QMainWindow):
             display_factor=100,
             tooltip="Verstärkt Kontraste zwischen benachbarten Flächen "
                     "(Felder, Wald, Bebauung).")
+        adv_lay.addWidget(g)
+
+        g = QGroupBox("Gradationskurve (Histogramm von Hand)")
+        gl = QVBoxLayout(g)
+        self.curve = CurveWidget()
+        self.curve.curveChanged.connect(lambda pts: self._set_value("curve", pts))
+        gl.addWidget(self.curve)
+        btn = QPushButton("Kurve zurücksetzen")
+        btn.clicked.connect(lambda: (self.curve.set_points(()), self._set_value("curve", ())))
+        gl.addWidget(btn)
         adv_lay.addWidget(g)
 
         g = QGroupBox("Schärfen")
@@ -736,9 +761,16 @@ class MainWindow(QMainWindow):
             if t1 - t0 > 0.5:
                 log.info("Vorschau: Vorbereiten %.1f s, Berechnen %.1f s", t1 - t0,
                          time.time() - t1)
+            before = P.histogram(P.stats_sample(prep, s, prep.stats))
+            valid = prep.__dict__.get("_valid") if s.stats_center else None
+            if valid is not None:
+                vm = cv2.resize(valid.astype(np.uint8), (img.shape[1], img.shape[0]),
+                                interpolation=cv2.INTER_NEAREST).astype(bool)
+                after = P.histogram(img[vm])
+            else:
+                after = P.histogram(img)
             return dict(qimg=gray_qimage(P.to_uint(img, 8)), size=prep.size, scale=scale,
-                        before=P.histogram(prep.stats), after=P.histogram(img),
-                        levels=glob.levels)
+                        before=before, after=after, levels=glob.levels)
 
         self._submit("preview", job)
         self._t_detail.start(0)
@@ -749,6 +781,7 @@ class MainWindow(QMainWindow):
         self._preview_scale = r["scale"]
         self.view.set_image(r["qimg"], r["size"], r["scale"])
         self.histogram.set_data(r["before"], r["after"], r["levels"])
+        self.curve.set_histogram(r["after"])
         self._update_zoom_label()
 
     def _render_detail(self):
@@ -920,10 +953,10 @@ class MainWindow(QMainWindow):
             if v <= 0:
                 new = replace(s, stretch=False, equalize=0.0)
             else:
-                # Weiß kaum abschneiden: helle Details (z. B. Bombentrichter) erhalten
-                new = replace(s, stretch=True, clip_black=round(0.1 + 0.4 * v, 2),
-                              clip_white=round(0.05 + 0.15 * v, 2),
-                              equalize=round(0.7 * v, 3))
+                # Streckung + Histogramm abflachen (Glockenform), wenig lokaler Ausgleich
+                new = replace(s, stretch=True, clip_black=round(0.1 + 0.3 * v, 2),
+                              clip_white=round(0.05 + 0.1 * v, 2),
+                              hist_flat=round(v, 3), equalize=round(0.15 * v, 3))
         elif key == "sharpness":
             new = replace(s, sharpen_amount=round(1.6 * v, 3),
                           sharpen_threshold=s.sharpen_threshold or 0.01)
@@ -937,7 +970,7 @@ class MainWindow(QMainWindow):
         s = self.entry.settings if self.entry else P.Settings()
         contrast = 0.0
         if s.stretch:
-            contrast = max(s.equalize / 0.7, 0.01)
+            contrast = max(s.hist_flat, s.equalize / 0.15 if s.hist_flat == 0 else 0, 0.01)
         values = {"contrast": min(contrast, 1.0),
                   "sharpness": min(s.sharpen_amount / 1.6, 1.0),
                   "brightness": s.midtones}
@@ -948,6 +981,10 @@ class MainWindow(QMainWindow):
         s = self.entry.settings if self.entry else P.Settings()
         if simple:
             self._sync_simple()
+        self.flat_mode.blockSignals(True)
+        self.flat_mode.setCurrentIndex(max(0, self.flat_mode.findData(s.hist_mode)))
+        self.flat_mode.blockSignals(False)
+        self.curve.set_points(s.curve)
         for key, sl in self.sliders.items():
             sl.setValue(getattr(s, key))
         for chk, key in ((self.chk_stretch, "stretch"), (self.chk_invert, "invert"),

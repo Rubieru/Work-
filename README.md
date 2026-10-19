@@ -8,45 +8,49 @@ Live-Vorschau und Voreinstellungen zum schnellen Ausprobieren.
 
 ## Bedienung in drei Schritten
 
-1. **Zuschneiden**: Rahmen mit der Maus aufziehen oder X, Y, Breite und Höhe in Pixeln eingeben.
-   Beim Hineinzoomen (Mausrad) erscheint ein Pixelraster. Eine Drehung von ±10° mit Raster
-   hilft, das Bild gerade auszurichten.
-2. **Verbessern**: Links eine Voreinstellung anklicken. Jede Kachel zeigt das eigene Bild mit
-   dieser Einstellung. Rechts lässt sich alles fein nachregeln. Die Vorschau ändert sich sofort.
-   Leertaste gedrückt halten zeigt das Original.
+1. **Zuschneiden**
+   - **„Ecken setzen“:** obere linke und untere rechte Ecke anklicken, eine Lupe hilft beim
+     genauen Treffen.
+   - **Feinjustieren:** Ecken oder Kanten ziehen, die gegenüberliegende Seite bleibt fest.
+     Einen neuen Rahmen ziehst du mit gedrückter Umschalttaste auf.
+   - **„Größe vom vorigen Bild übernehmen“ und „Größe festhalten“:** Alle Bilder einer Serie
+     bekommen exakt dieselbe Pixelgröße (für die Photogrammetrie). Danach den Rahmen nur noch
+     verschieben.
+   - **Drehung** um ±10° mit Raster zum Ausrichten.
+2. **Verbessern**: Links eine Voreinstellung anklicken, rechts unter *Einfach* oder *Erweitert*
+   nachregeln. Die Vorschau ändert sich sofort, Leertaste gedrückt halten zeigt das Original.
 3. **Bild speichern**: Das Bild wird in voller Auflösung berechnet, als TIFF 16/8 Bit, PNG oder
-   JPEG. Bei TIFF bleibt die dpi-Angabe erhalten.
-
-| Zuschneiden | Detailansicht 100 % |
-|---|---|
-| ![Zuschneiden](docs/zuschneiden.png) | ![100 %](docs/detail_100.png) |
+   JPEG. Standardmäßig mit Grauwerten **1–255** (kein Wert 0). Georeferenz und dpi bleiben
+   erhalten.
 
 ## Werkzeuge
 
+Die Bildbearbeitung folgt den Grundlagen der Bildaufbereitung historischer Luftbilder für die
+Photogrammetrie: Das Histogramm wird über den ganzen Grauwertbereich gestreckt (1–255), die
+Spitze abgeflacht, und es wird nur maßvoll gefiltert. Der **schwarze Scanrahmen** mit Messmarken
+und Bildnummer wird automatisch erkannt und zählt bei Histogramm und Streckung nie mit.
+
 | Bereich | Regler | Wozu |
 |---|---|---|
-| Kontrast | **Histogramm strecken**, Schwarz/Weiß abschneiden | Spreizt flaue Grauwerte auf den vollen Bereich |
-| | Puffer (Detailschutz) | Streckt weniger hart, damit in sehr hellen und dunklen Bereichen nichts verloren geht |
-| | Bildrand nicht mitmessen | Scanrahmen, Messmarken und Beschriftung verfälschen die Streckung nicht |
-| | **Kontrastausgleich je Bildbereich** | CLAHE bzw. „Multidodging“: holt Details aus flauen und dunklen Partien |
-| | Mitteltöne, Lokaler Kontrast | Feinabstimmung |
-| Schärfen | Stärke, Radius, Schwelle | Unscharf maskieren. Die Schwelle verhindert, dass Filmkorn mitgeschärft wird |
-| Bildfehler | Staub & Kratzer entfernen | Entfernt kleine Punkte und feine Kratzer vom Scan |
-| | Filmkorn reduzieren | Kantenerhaltendes Glätten |
-| | Ausleuchtung ausgleichen | Gleicht dunkle Ränder und Vignettierung aus |
-| | Negativ umkehren | Für gescannte Negative |
+| Kontrast | **Histogramm strecken**, Schwarz/Weiß abschneiden, Puffer | Grauwerte über den ganzen Bereich spreizen |
+| | **Histogramm abflachen** mit drei Varianten | Weich (Glockenform), Stark (gleichmäßig), Schonend (Spitze kappen) |
+| | **Gradationskurve** | Histogramm von Hand nachbearbeiten: Punkte setzen und ziehen |
+| | Kontrastausgleich je Bildbereich, Mitteltöne, Lokaler Kontrast | Feinabstimmung |
+| Schärfen | Stärke, Radius, Schwelle | Unscharf maskieren (Hochpass). Die Schwelle schont das Filmkorn |
+| Bildfehler | Staub & Kratzer (Median), Filmkorn reduzieren, Ausleuchtung ausgleichen, Negativ umkehren | |
+
+Das Histogramm im Programm zeigt Original und Ergebnis untereinander. Eine rote Markierung
+erscheint, wenn Pixel bei 0 oder 255 anstoßen.
 
 **Voreinstellungen:**
-- **Automatisch (empfohlen):** misst Helligkeit, Kontrast und Filmkorn jedes Bildes und stellt
-  die Regler passend ein, egal ob Stadt, Wald, Wiesen oder Wasser. Das funktioniert auch in der
-  Stapelverarbeitung je Bild.
+- **Automatisch (empfohlen):** misst jedes Bild und stellt Streckung, Abflachen und Schärfe
+  passend ein.
+- **Standard (Bachelorarbeit):** Streckung und weiches Abflachen in Glockenform.
+- **Varianten:** Abflachen stark, Abflachen schonend, Nur strecken.
 - **Nach Bildinhalt:** Stadt/Bebauung, Wald, Wiesen & Felder, Wasser/Fluss.
-- **Nach Bildproblem:** Flau/kontrastarm, Details/Auswertung (Bombentrichter, Gräben), Zu dunkel,
-  Zu hell, Ungleich belichtet, Grobkörnig, Staub & Kratzer.
-- **Sonstige:** Standard, GIS/DGM sicher (wie das Gemini-Skript), Negativ.
-
-Abgestimmt wurden sie an echten Weltkriegs-Luftbildern: Helle Flächen und dunkle Partien behalten
-Zeichnung, weil Lichter und Schatten weich begrenzt statt hart abgeschnitten werden.
+- **Nach Bildproblem:** Flau, Details/Auswertung, Zu dunkel, Zu hell, Ungleich belichtet,
+  Grobkörnig, Staub & Kratzer.
+- **Sonstige:** GIS/DGM sicher (wie das Gemini-Skript), Negativ.
 
 **Georeferenzierung:** GeoTIFF-Koordinaten, Koordinatensystem sowie World-Files (.tfw/.jgw/.pgw)
 und .prj bleiben beim Speichern erhalten. Zuschnitt und Drehung werden dabei korrekt

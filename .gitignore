@@ -6,3 +6,4 @@ dist/
 *.spec
 .venv/
 *.zip
+luftbild_editor/resources/logo.ico

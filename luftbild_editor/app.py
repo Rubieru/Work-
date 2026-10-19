@@ -155,8 +155,8 @@ def main(argv=None) -> int:
     app.setApplicationName("Luftbild-Editor")
     app.setOrganizationName("Luftbild-Editor")
     app.setApplicationDisplayName(theme.APP_NAME)
-    if theme.logo_path():
-        app.setWindowIcon(QIcon(theme.logo_path()))
+    if theme.icon_path():
+        app.setWindowIcon(QIcon(theme.icon_path()))
     apply_style(app)
     log_path = setup_logging()
     logging.getLogger("luftbild_editor").info("Start Version %s, Protokoll %s",
