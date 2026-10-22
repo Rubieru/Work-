@@ -155,7 +155,9 @@ def run_batch(job: BatchJob, settings: P.Settings, progress=None, cancelled=None
         if cancelled and cancelled():
             break
         try:
-            doc = current_doc if current_doc and current_doc.path == src else P.Document.open(src)
+            same = current_doc and current_doc.path and \
+                os.path.normcase(os.path.abspath(current_doc.path)) == os.path.normcase(src)
+            doc = current_doc if same else P.Document.open(src)
             stem = os.path.splitext(os.path.basename(src))[0]
             out = os.path.join(job.folder, stem + job.suffix + ext)
             if os.path.abspath(out) == os.path.abspath(src):

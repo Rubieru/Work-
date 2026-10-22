@@ -1371,16 +1371,18 @@ class MainWindow(QMainWindow):
             return
         self._commit_history()
         from .batch import BatchDialog, run_batch
-        others = [e.path for e in self.entries if e is not self.entry]
-        dlg = BatchDialog(self, os.path.basename(self.entry.path), others,
+        # das aktuelle Bild zuerst, dann alle anderen geöffneten Bilder
+        files = [self.entry.path] + [e.path for e in self.entries if e is not self.entry]
+        dlg = BatchDialog(self, os.path.basename(self.entry.path), files,
                           os.path.dirname(self.entry.path), auto=self._last_preset_auto)
         if dlg.exec() != BatchDialog.Accepted:
             return
         job = dlg.job()
         settings, current = self.entry.settings, self.doc
         # Einstellungen auch für die Bilder in der Liste übernehmen
+        chosen = {os.path.normcase(os.path.abspath(f)) for f in job.files}
         for e in self.entries:
-            if e is not self.entry and e.path in job.files:
+            if e is not self.entry and os.path.normcase(os.path.abspath(e.path)) in chosen:
                 e.settings = settings if job.use_geometry else P.with_tonal(
                     e.settings, P.tonal_dict(settings))
                 del e.history[e.hist_idx + 1:]
@@ -1399,9 +1401,10 @@ class MainWindow(QMainWindow):
 
     def _done_batch(self, res):
         written, errors = res
+        cancelled = self._batch_cancel
         self._close_progress()
         text = f"{len(written)} Bilder gespeichert."
-        if self._batch_cancel:
+        if cancelled:
             text += " (abgebrochen)"
         if written:
             text += f"\nZielordner: {os.path.dirname(written[0])}"
@@ -1433,6 +1436,11 @@ class MainWindow(QMainWindow):
     def _close_progress(self):
         QApplication.restoreOverrideCursor()
         if self._progress:
+            # close() löst bei QProgressDialog "canceled" aus – das ist kein Abbruch
+            try:
+                self._progress.canceled.disconnect()
+            except (RuntimeError, TypeError):
+                pass
             self._progress.close()
             self._progress = None
 

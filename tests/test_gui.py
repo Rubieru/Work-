@@ -262,3 +262,41 @@ def test_zoom_keeps_point_under_mouse(app, tmp_path, monkeypatch, tab):
         assert bar.value() > before
     assert view.zoom() == pytest.approx(z)
     win.close()
+
+
+def test_batch_includes_current_image_and_is_not_reported_cancelled(app, tmp_path, monkeypatch):
+    from luftbild_editor import batch as B
+    from luftbild_editor.main_window import MainWindow
+    monkeypatch.setattr("PySide6.QtCore.QStandardPaths.writableLocation",
+                        lambda *_: str(tmp_path / "cfg"))
+    files = []
+    for i in range(3):
+        f = tmp_path / f"bild{i}.tif"
+        P.save_image(str(f), P.to_uint(synthetic_aerial(500, 400, seed=i), 8), "tif8")
+        files.append(str(f))
+    win = MainWindow()
+    win.show()
+    win.add_files(files)
+    wait(app)
+    win.tabs.setCurrentIndex(1)
+    wait(app)
+    item = next(win.preset_list.item(i) for i in range(win.preset_list.count())
+                if win.preset_list.item(i).text() == "Streckung + Hochpassfilter")
+    win._apply_preset_item(item)
+    wait(app)
+
+    monkeypatch.setattr(B.BatchDialog, "exec", lambda self: B.BatchDialog.Accepted)
+    shown = []
+    monkeypatch.setattr("luftbild_editor.main_window.QMessageBox.information",
+                        lambda *a: shown.append(a[2]))
+    monkeypatch.setattr("luftbild_editor.main_window.QMessageBox.warning",
+                        lambda *a: shown.append(a[2]))
+    win.batch()
+    wait(app)
+    for _ in range(20):
+        app.processEvents()
+    out = sorted(os.listdir(tmp_path / "bearbeitet"))
+    assert len(out) == 3 and any(n.startswith(os.path.basename(win.entry.path)[:-4])
+                                 for n in out)
+    assert shown and "3 Bilder gespeichert" in shown[0] and "abgebrochen" not in shown[0]
+    win.close()
