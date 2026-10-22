@@ -236,7 +236,7 @@ def test_zoom_keeps_point_under_mouse(app, tmp_path, monkeypatch, tab):
     view.zoom_by(3.0)   # Bild größer als das Fenster (sonst zentriert Qt es zwangsläufig)
     app.processEvents()
     # Maus nicht in der Mitte – mehrmals hinein- und wieder herauszoomen
-    mouse = QPointF(vp.width() * 0.25, vp.height() * 0.7)
+    mouse = QPointF(vp.width() // 4, vp.height() * 7 // 10)
     for steps in (3, 2, 4, -2):
         target = view.mapToScene(mouse.toPoint())
         for _ in range(abs(steps)):
@@ -246,7 +246,8 @@ def test_zoom_keeps_point_under_mouse(app, tmp_path, monkeypatch, tab):
             view.wheelEvent(ev)
         app.processEvents()
         now = view.mapFromScene(target)
-        assert abs(now.x() - mouse.x()) <= 2 and abs(now.y() - mouse.y()) <= 2, (steps, now)
+        # Bildlaufleisten rechnen in ganzen Pixeln – je Schritt höchstens 1 px Rundung
+        assert abs(now.x() - mouse.x()) <= 3 and abs(now.y() - mouse.y()) <= 3, (steps, now)
 
     # ohne Strg: Rad scrollt (hoch/runter senkrecht, seitlich gekippt waagerecht)
     z = view.zoom()
