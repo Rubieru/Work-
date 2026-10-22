@@ -9,10 +9,13 @@ from .processing import TONAL_FIELDS
 # Nur Tonwert-/Filterwerte. Zuschnitt und Drehung bleiben beim Bild.
 #
 # Die Namen sagen, was die Voreinstellung macht. Grundlage aller Voreinstellungen ist die
-# lineare Histogrammstreckung auf 1–255 (schwarzer Scanrahmen zählt nicht mit). Filter
+# Histogrammstreckung auf 1–255 (schwarzer Scanrahmen zählt nicht mit). Danach wird die
+# mittlere Helligkeit des Originals wiederhergestellt (Gamma), damit das Bild durch die
+# Streckung kontrastreicher, aber nicht heller wird. Filter
 # werden nur maßvoll eingesetzt, damit die radiometrische Information für die
 # photogrammetrische Einrichtung erhalten bleibt.
-_BASE = {"stretch": True, "clip_black": 0.1, "clip_white": 0.05, "stats_center": True}
+_BASE = {"stretch": True, "clip_black": 0.1, "clip_white": 0.05, "stats_center": True,
+         "keep_brightness": True}
 # Hochpassfilter (Unscharf maskieren): Radius 1 px; die Schwelle schont das Filmkorn
 _HP = {"sharpen_amount": 0.7, "sharpen_radius": 1.0, "sharpen_threshold": 0.008}
 
@@ -61,8 +64,8 @@ PRESET_INFO: dict[str, str] = {
     AUTO: "Misst Helligkeit, Kontrast und Filmkorn dieses Bildes: Histogrammstreckung, "
           "bei sehr spitzem Histogramm leichtes Abflachen, bei starkem Korn Medianfilter, "
           "danach Hochpassfilter.",
-    "Histogrammstreckung": "Lineare Streckung der Grauwerte auf 1–255, sonst nichts. "
-                           "Für Bilder ohne Bildfehler.",
+    "Histogrammstreckung": "Streckung der Grauwerte auf 1–255; die mittlere Helligkeit "
+                           "des Originals bleibt. Sonst nichts – für Bilder ohne Bildfehler.",
     "Streckung + Hochpassfilter": "Streckung, dann Hochpassfilter (Kanten betonen). "
                                   "Für die meisten Bilder – Bebauung, Wege, Trichterränder "
                                   "werden deutlicher.",

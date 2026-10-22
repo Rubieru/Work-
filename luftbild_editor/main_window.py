@@ -446,6 +446,13 @@ class MainWindow(QMainWindow):
             "Die wichtigste Verbesserung für flaue historische Luftbilder.")
         self.chk_stretch.toggled.connect(lambda v: self._set_value("stretch", v))
         gl.addWidget(self.chk_stretch)
+        self.chk_keep = QCheckBox("Helligkeit des Originals beibehalten")
+        self.chk_keep.setToolTip(
+            "Nach dem Strecken wird die Bildmitte per Gamma wieder auf die Helligkeit des "
+            "Originals gelegt. Das Bild wird kontrastreicher, aber nicht heller – helle "
+            "Flächen leuchten nicht aus. Schwarz- und Weißpunkt (1–255) bleiben.")
+        self.chk_keep.toggled.connect(lambda v: self._set_value("keep_brightness", v))
+        gl.addWidget(self.chk_keep)
         add(gl, "hist_flat", "Histogramm abflachen", 0, 1, 0.01, 0.0, decimals=0,
             suffix=" %", display_factor=100,
             tooltip="Verteilt die Grauwerte breiter über den ganzen Bereich und flacht die "
@@ -1012,7 +1019,7 @@ class MainWindow(QMainWindow):
         for key, sl in self.sliders.items():
             sl.setValue(getattr(s, key))
         for chk, key in ((self.chk_stretch, "stretch"), (self.chk_invert, "invert"),
-                         (self.chk_center, "stats_center")):
+                         (self.chk_center, "stats_center"), (self.chk_keep, "keep_brightness")):
             chk.blockSignals(True)
             chk.setChecked(getattr(s, key))
             chk.blockSignals(False)
@@ -1049,6 +1056,7 @@ class MainWindow(QMainWindow):
         for k in ("clip_black", "clip_white", "stretch_buffer"):
             self.sliders[k].setEnabled(stretch)
         self.chk_center.setEnabled(stretch)
+        self.chk_keep.setEnabled(stretch)
         item = self.preset_list.currentItem()
         self.btn_del_preset.setEnabled(
             bool(item and item.isSelected() and item.data(Qt.UserRole) in self.user_presets))

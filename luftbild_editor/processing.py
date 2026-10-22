@@ -55,6 +55,8 @@ class Settings:
     clip_white: float = 0.5        # % der hellsten Pixel, die weiß werden
     stats_center: bool = True      # schwarzen Scanrahmen, Beschriftung, Rand nicht mitmessen
     stretch_buffer: float = 0.0    # Puffer 0..0.3: Streckung weniger hart (Detailschutz)
+    keep_brightness: bool = False  # nach dem Strecken die mittlere Helligkeit des Originals
+                                   # wiederherstellen (Gamma), statt das Bild aufzuhellen
     midtones: float = 0.0          # -1 (dunkler) .. +1 (heller)
     equalize: float = 0.0          # Kontrastausgleich je Bildbereich (CLAHE) 0..1
     hist_flat: float = 0.0         # Histogramm abflachen (global) 0..1
@@ -470,6 +472,7 @@ class Globals:
     clahe: np.ndarray | None = None  # Kontrastausgleich-Tabellen (ny, nx, bins)
     flat: np.ndarray | None = None   # Tabelle "Histogramm abflachen"
     curve: np.ndarray | None = None  # Tabelle Gradationskurve
+    gamma: float = 1.0               # Gamma aus "Helligkeit beibehalten"
 
 
 CLAHE_TILES = 8       # Kacheln entlang der langen Bildseite
@@ -678,19 +681,44 @@ def _clahe_tables(img: np.ndarray) -> np.ndarray:
     return tables
 
 
+# Zielbereich der mittleren Helligkeit (Median) bei "Helligkeit beibehalten": sehr
+# dunkle Scans werden etwas angehoben, sehr helle etwas abgesenkt
+KEEP_MEDIAN = (0.3, 0.5)
+
+
+def brightness_gamma(prep: Prepared, s: Settings, levels) -> float:
+    """Gamma, das nach der Streckung den Median wieder auf den des Originals legt.
+
+    Eine lineare Streckung hellt ein Bild, dessen Schatten schon fast schwarz sind, deutlich
+    auf (nur die Lichter werden nach oben gezogen). Das Gamma verschiebt die Mitteltöne
+    zurück; Schwarz- und Weißpunkt – und damit der Bereich 1–255 – bleiben.
+    """
+    if not (s.stretch and s.keep_brightness):
+        return 1.0
+    sample = stats_sample(prep, s, _stats_tonal(prep, s))
+    lo, hi = levels
+    med = float(np.median(sample))
+    m = (med - lo) / max(hi - lo, 1e-6)
+    target = float(np.clip(med, *KEEP_MEDIAN))
+    if not 0.02 < m < 0.98:
+        return 1.0
+    return float(np.clip(np.log(target) / np.log(m), 0.6, 1.8))
+
+
 def compute_globals(prep: Prepared, s: Settings) -> Globals:
     levels = compute_levels(prep, s)
+    gamma = brightness_gamma(prep, s, levels)
     clahe = flat = None
     curve = curve_lut(s.curve)
     if s.equalize > 0 or s.hist_flat > 0:
         st = _stats_tonal(prep, s)
-        st = _levels_gamma(st.astype(np.float32, copy=True), s, levels)
+        st = _levels_gamma(st.astype(np.float32, copy=True), s, levels, gamma)
         if s.hist_flat > 0:
             flat = _flatten_lut(stats_sample(prep, s, st), s.hist_mode)
             st = _tone(st, s, flat, curve)
         if s.equalize > 0:
             clahe = _clahe_tables(st)
-    return Globals(levels, clahe, flat, curve)
+    return Globals(levels, clahe, flat, curve, gamma)
 
 
 def _tone(img, s, flat, curve):
@@ -702,13 +730,14 @@ def _tone(img, s, flat, curve):
     return img
 
 
-def _levels_gamma(img: np.ndarray, s: Settings, levels) -> np.ndarray:
+def _levels_gamma(img: np.ndarray, s: Settings, levels, gamma: float = 1.0) -> np.ndarray:
     lo, hi = levels
     if (lo, hi) != (0.0, 1.0):
         img = (img - lo) * (1.0 / (hi - lo))
     np.clip(img, 0.0, 1.0, out=img)
-    if abs(s.midtones) > 1e-4:
-        img = np.power(img, 3.0 ** (-s.midtones), dtype=np.float32)
+    exponent = gamma * 3.0 ** (-s.midtones)
+    if abs(exponent - 1.0) > 1e-4:
+        img = np.power(img, exponent, dtype=np.float32)
     return img
 
 
@@ -752,7 +781,8 @@ def auto_tonal(prep: Prepared) -> dict:
     - Filmkorn wird aus einem Ausschnitt in voller Auflösung geschätzt; danach richten
       sich Körnungsfilter und Schärfe-Schwelle
     """
-    base = Settings(stretch=True, clip_black=0.1, clip_white=0.05, stats_center=True)
+    base = Settings(stretch=True, clip_black=0.1, clip_white=0.05, stats_center=True,
+                    keep_brightness=True)
     lo, hi = compute_levels(prep, base)
     sample = stats_sample(prep, base)
     x = np.clip((sample - lo) / max(hi - lo, 1e-4), 0, 1)
@@ -764,10 +794,8 @@ def auto_tonal(prep: Prepared) -> dict:
     window = np.convolve(frac, np.ones(16), mode="valid").max()
     hist_flat = float(np.clip((window - 0.4) * 2.0, 0.0, 0.5))
 
-    # Helligkeit: die Glockenform zentriert ohnehin; nur bei sehr hellen/dunklen
-    # Bildern leicht nachhelfen
-    med = float(np.clip(np.median(x), 0.05, 0.95))
-    midtones = float(np.clip((0.5 - med) * 0.6, -0.15, 0.25))
+    # Helligkeit: "Helligkeit beibehalten" legt die Bildmitte nach dem Strecken wieder auf
+    # die des Originals – das Bild wird kontrastreicher, aber nicht heller
 
     # Filmkorn: robuste Streuung gegenüber dem Median in einem Vollauflösungs-Ausschnitt
     H, W = prep.base.shape
@@ -786,7 +814,7 @@ def auto_tonal(prep: Prepared) -> dict:
     return {
         "stretch": True, "clip_black": 0.1, "clip_white": 0.05, "stats_center": True,
         "hist_flat": round(hist_flat, 2), "hist_mode": "glocke",
-        "midtones": round(midtones, 2), "median": median,
+        "keep_brightness": True, "median": median,
         "sharpen_amount": amount, "sharpen_radius": radius, "sharpen_threshold": thr,
     }
 
@@ -846,7 +874,7 @@ def apply_tonal(img: np.ndarray, prep: Prepared, s: Settings, glob: Globals,
             sigma_color = (0.01 + 0.09 * s.denoise) * (glob.levels[1] - glob.levels[0])
             img = cv2.bilateralFilter(img, 0, max(sigma_color, 1e-3), sigma_space)
 
-    img = _levels_gamma(img, s, glob.levels)
+    img = _levels_gamma(img, s, glob.levels, glob.gamma)
     img = _tone(img, s, glob.flat, glob.curve)
 
     if s.equalize > 0 and glob.clahe is not None:

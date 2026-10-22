@@ -157,9 +157,11 @@ def test_auto_adapts_to_dark_and_flat_scans():
         prep = doc.prepare(P.Settings())
         values = P.auto_tonal(prep)
         out = P.render(prep, P.with_tonal(P.Settings(), values))
-        means[name] = float(out.mean())
+        means[name] = float(np.median(out))
         assert np.mean(out > 0.99) < 0.01 and np.mean(out < 0.01) < 0.01
-    assert max(means.values()) - min(means.values()) < 0.08
+    # Helligkeit des Originals bleibt erhalten, sehr dunkle Scans werden angehoben
+    assert means["dunkel"] >= P.KEEP_MEDIAN[0] - 0.02
+    assert all(m <= P.KEEP_MEDIAN[1] + 0.02 for m in means.values())
 
 
 def test_auto_preset_values():
@@ -244,3 +246,19 @@ def test_median_and_lowpass_filters():
         whole = P.to_uint(P.render(doc.prepare(s), s), 16)
         diff = np.abs(whole.astype(int) - P.render_full(doc, s, bits=16, tile=128).astype(int))
         assert diff.max() <= 2
+
+
+def test_keep_brightness_stretches_without_brightening():
+    # Schatten schon fast schwarz, Lichter nur bis ~0,8 – wie viele Scans
+    rng = np.random.default_rng(3)
+    img = np.clip(0.02 + rng.gamma(3.0, 0.12, (400, 500)), 0, 0.8).astype(np.float32)
+    doc = P.Document(P.LoadedImage(img, 16, None))
+    prep = doc.prepare(P.Settings())
+    base = P.Settings(stretch=True, clip_black=0.1, clip_white=0.05, stats_center=False)
+    lin = P.render(prep, base)
+    keep = P.render(prep, replace(base, keep_brightness=True))
+    med = float(np.median(img))
+    assert 0.3 < med < 0.5
+    assert np.median(lin) > med + 0.03                  # lineare Streckung hellt auf
+    assert abs(float(np.median(keep)) - med) < 0.02     # Helligkeit bleibt
+    assert keep.max() > 0.95 and keep.min() < 0.05      # trotzdem ganzer Bereich
