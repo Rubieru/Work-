@@ -55,7 +55,7 @@ class Settings:
     clip_white: float = 0.5        # % der hellsten Pixel, die weiß werden
     stats_center: bool = True      # schwarzen Scanrahmen, Beschriftung, Rand nicht mitmessen
     stretch_buffer: float = 0.0    # Puffer 0..0.3: Streckung weniger hart (Detailschutz)
-    keep_brightness: bool = False  # nach dem Strecken die mittlere Helligkeit des Originals
+    keep_brightness: bool = True   # nach dem Strecken die mittlere Helligkeit des Originals
                                    # wiederherstellen (Gamma), statt das Bild aufzuhellen
     midtones: float = 0.0          # -1 (dunkler) .. +1 (heller)
     equalize: float = 0.0          # Kontrastausgleich je Bildbereich (CLAHE) 0..1

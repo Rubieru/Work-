@@ -60,12 +60,17 @@ und .prj bleiben beim Speichern erhalten. Zuschnitt und Drehung werden dabei kor
 umgerechnet. Die Option *„Für GIS: Pixelwert 0 vermeiden“* speichert Schwarz als 1, damit
 GIS-Programme dunkle Stellen nicht als NoData behandeln.
 
-**Stapelverarbeitung:** Mit dem Knopf unter „Bild speichern“ oder Strg+B werden die
-Einstellungen des aktuellen Bildes auf weitere Bilder oder ganze Ordner angewendet. Auf Wunsch
-werden Zuschnitt und Drehung mit übernommen.
+**Viele Bilder zuschneiden und bearbeiten (empfohlener Ablauf):**
+1. Alle Bilder öffnen (auch per Drag & Drop).
+2. Beim ersten Bild den Rahmen setzen und „Größe festhalten“ anhaken.
+3. Zum nächsten Bild wechseln: der Rahmen erscheint dort in derselben Größe an derselben
+   Stelle – nur noch hinschieben. Jedes Bild merkt sich seinen Rahmen (✂ in der Liste).
+4. Voreinstellung wählen (z. B. „Automatisch“) und Stapelverarbeitung (Strg+B) starten:
+   „Jedes Bild mit seinem eigenen Rahmen“ und „Regler für jedes Bild automatisch anpassen“.
+   Alle Bilder werden in einem Schritt zugeschnitten, bearbeitet und gespeichert.
 
-Weitere Funktionen: mehrere Bilder öffnen (auch per Drag & Drop) sowie Rückgängig/Wiederholen
-mit Strg+Z und Strg+Y.
+**Bilderliste:** mehrere Bilder mit Strg/Umschalt + Klick oder Strg+A markieren, dann
+Rechtsklick → „Entfernen“ oder Entf-Taste. Rückgängig/Wiederholen mit Strg+Z und Strg+Y.
 
 Große Scans werden für die Vorschau verkleinert berechnet. Beim Hineinzoomen und beim Speichern
 rechnet das Programm in voller Auflösung, und zwar so, dass Vorschau und Ergebnis übereinstimmen.

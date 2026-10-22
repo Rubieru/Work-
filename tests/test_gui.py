@@ -301,3 +301,101 @@ def test_batch_includes_current_image_and_is_not_reported_cancelled(app, tmp_pat
                                  for n in out)
     assert shown and "3 Bilder gespeichert" in shown[0] and "abgebrochen" not in shown[0]
     win.close()
+
+
+def test_crop_workflow_carry_frame_and_batch_with_own_crops(app, tmp_path, monkeypatch):
+    from luftbild_editor import batch as B
+    from luftbild_editor.main_window import MainWindow
+    monkeypatch.setattr("PySide6.QtCore.QStandardPaths.writableLocation",
+                        lambda *_: str(tmp_path / "cfg"))
+    monkeypatch.setattr("PySide6.QtCore.QSettings.value",
+                        lambda self, key, default=None, type=None: default)
+    files = []
+    for i in range(3):
+        f = tmp_path / f"scan{i}.tif"
+        P.save_image(str(f), P.to_uint(synthetic_aerial(600, 500, seed=i), 8), "tif8")
+        files.append(str(f))
+    win = MainWindow()
+    win.show()
+    win.add_files(files)
+    wait(app)
+    win.tabs.setCurrentIndex(0)
+    wait(app)
+
+    # Bild 1: Rahmen setzen und Größe festhalten
+    win._set_crop((40, 30, 400, 300))
+    win.chk_lock_size.setChecked(True)
+    # Bild 2: Rahmen erscheint automatisch, wird nur verschoben
+    win.image_list.setCurrentRow(1)
+    wait(app)
+    assert win.entry.settings.crop == (40, 30, 400, 300)
+    win._set_crop((100, 120, 400, 300))
+    # Bild 3: übernimmt die zuletzt benutzte Stelle
+    win.image_list.setCurrentRow(2)
+    wait(app)
+    assert win.entry.settings.crop == (100, 120, 400, 300)
+    assert all(win.image_list.item(i).text().startswith("✂") for i in range(3))
+
+    # Stapelverarbeitung: jedes Bild mit eigenem Rahmen und automatischen Reglern
+    def fake_exec(dlg):
+        dlg.chk_auto.setChecked(True)
+        dlg.geo_mode.setCurrentIndex(dlg.geo_mode.findData("own"))
+        return B.BatchDialog.Accepted
+    monkeypatch.setattr(B.BatchDialog, "exec", fake_exec)
+    monkeypatch.setattr("luftbild_editor.main_window.QMessageBox.information", lambda *a: None)
+    win.batch()
+    wait(app)
+    out_dir = tmp_path / "bearbeitet"
+    outs = sorted(os.listdir(out_dir))
+    assert len(outs) == 3
+    for name in outs:
+        img = P.load_image(str(out_dir / name)).data
+        assert img.shape == (300, 400) and img.min() >= 1
+    # Ausschnitt von Bild 1 stimmt (Stelle 40/30, nicht die von Bild 2)
+    src = P.load_image(files[0]).data[30:330, 40:440].astype(float)
+    got = P.load_image(str(out_dir / "scan0_bearbeitet.tif")).data.astype(float)
+    assert np.corrcoef(src.ravel(), got.ravel())[0, 1] > 0.9
+
+    # Mehrere Bilder markieren und entfernen
+    win.image_list.selectAll()
+    win.remove_selected()
+    assert win.entries == [] and win.image_list.count() == 0 and win.doc is None
+    win.close()
+
+
+def test_remove_some_images_keeps_current(app, tmp_path, monkeypatch):
+    from luftbild_editor.main_window import MainWindow
+    monkeypatch.setattr("PySide6.QtCore.QStandardPaths.writableLocation",
+                        lambda *_: str(tmp_path / "cfg"))
+    files = []
+    for i in range(4):
+        f = tmp_path / f"b{i}.tif"
+        P.save_image(str(f), P.to_uint(synthetic_aerial(300, 200, seed=i), 8), "tif8")
+        files.append(str(f))
+    win = MainWindow()
+    win.show()
+    win.add_files(files)
+    wait(app)
+    win.image_list.setCurrentRow(3)
+    wait(app)
+    for r in (0, 1):
+        win.image_list.item(r).setSelected(True)
+    win.image_list.item(3).setSelected(False)
+    win.remove_selected()
+    wait(app)
+    assert [os.path.basename(e.path) for e in win.entries] == ["b2.tif", "b3.tif"]
+    assert win.entry.path.endswith("b3.tif") and win.image_list.currentRow() == 1
+    win.close()
+
+
+def test_batch_dialog_warns_about_images_without_frame(app, tmp_path, monkeypatch):
+    from luftbild_editor import batch as B
+    a, b = str(tmp_path / "a.tif"), str(tmp_path / "b.tif")
+    geos = {B.path_key(a): (0.0, (0, 0, 10, 10)), B.path_key(b): (0.0, None)}
+    asked = []
+    monkeypatch.setattr(B.QMessageBox, "question",
+                        lambda *args: asked.append(args[2]) or B.QMessageBox.No)
+    dlg = B.BatchDialog(None, "a.tif", [a, b], str(tmp_path), geometries=geos)
+    dlg._accept()
+    assert asked and "b.tif" in asked[0] and "a.tif" not in asked[0]
+    assert dlg.result() != B.BatchDialog.Accepted

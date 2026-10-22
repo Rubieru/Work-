@@ -2,16 +2,21 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QPushButton, QVBoxLayout)
+                               QListWidget, QListWidgetItem, QMessageBox, QPushButton,
+                               QVBoxLayout)
 
 from . import processing as P
 
 IMAGE_EXTS = (".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp", ".jp2")
+
+
+def path_key(path: str) -> str:
+    return os.path.normcase(os.path.abspath(path))
 
 
 @dataclass
@@ -20,23 +25,34 @@ class BatchJob:
     folder: str
     fmt: str
     suffix: str
-    use_geometry: bool
+    use_geometry: bool   # Zuschnitt und Drehung des aktuellen Bildes für alle
     auto: bool = False   # Regler je Bild automatisch bestimmen
+    # eigener Zuschnitt/Drehung je Bild: path_key -> (rotation, crop)
+    geometries: dict | None = None
+
+
+GEOMETRY_MODES = (
+    ("own", "Jedes Bild mit seinem eigenen Rahmen (✂)"),
+    ("same", "Rahmen und Drehung dieses Bildes für alle"),
+    ("none", "Nicht zuschneiden"),
+)
 
 
 class BatchDialog(QDialog):
     def __init__(self, parent, source_name: str, files: list[str], start_dir: str,
-                 auto: bool = False):
+                 auto: bool = False, geometries: dict | None = None):
         super().__init__(parent)
         self.setWindowTitle("Stapelverarbeitung")
         self.resize(640, 560)
         self._start_dir = start_dir
+        self._geometries = geometries or {}
 
         lay = QVBoxLayout(self)
         info = QLabel(
             f"Die Einstellungen von <b>{source_name}</b> werden auf alle angehakten Bilder "
             "angewendet. Die Bilder werden in voller Auflösung bearbeitet und gespeichert. "
-            "Die Originale bleiben unverändert, eine Georeferenzierung wird übernommen.")
+            "Die Originale bleiben unverändert, eine Georeferenzierung wird übernommen. "
+            "✂ = Bild hat einen eigenen Zuschnitt-Rahmen.")
         info.setWordWrap(True)
         lay.addWidget(info)
 
@@ -62,11 +78,14 @@ class BatchDialog(QDialog):
             "Sonst werden die Regler des aktuellen Bildes genau übernommen.")
         self.chk_auto.setChecked(auto)
         form.addRow(self.chk_auto)
-        self.chk_geo = QCheckBox("Zuschnitt und Drehung ebenfalls übernehmen")
-        self.chk_geo.setToolTip(
-            "Sinnvoll, wenn alle Scans gleich groß sind und denselben Rand haben. "
-            "Sonst bleibt jedes Bild ungeschnitten.")
-        form.addRow(self.chk_geo)
+        self.geo_mode = QComboBox()
+        for key, label in GEOMETRY_MODES:
+            self.geo_mode.addItem(label, key)
+        self.geo_mode.setToolTip(
+            "Eigener Rahmen: jedes Bild wird so zugeschnitten und gedreht, wie es im "
+            "Schritt 1 eingestellt wurde (Bilder ohne Rahmen bleiben ganz).\n"
+            "Rahmen dieses Bildes: sinnvoll, wenn alle Scans exakt gleich liegen.")
+        form.addRow("Zuschneiden", self.geo_mode)
         folder_row = QHBoxLayout()
         self.folder = QLineEdit(os.path.join(start_dir, "bearbeitet") if start_dir else "")
         btn = QPushButton("…")
@@ -95,8 +114,10 @@ class BatchDialog(QDialog):
         for i in range(self.list.count()):
             if self.list.item(i).data(Qt.UserRole) == path:
                 return
-        item = QListWidgetItem(os.path.basename(path))
-        item.setToolTip(path)
+        geo = self._geometries.get(path_key(path))
+        crop = geo[1] if geo else None
+        item = QListWidgetItem(("✂ " if crop else "") + os.path.basename(path))
+        item.setToolTip(path + (f"\nZuschnitt {crop[2]} × {crop[3]} px" if crop else ""))
         item.setData(Qt.UserRole, path)
         item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
         item.setCheckState(Qt.Checked)
@@ -133,14 +154,27 @@ class BatchDialog(QDialog):
             self._pick_folder()
             if not self.folder.text().strip():
                 return
+        if self.geo_mode.currentData() == "own":
+            missing = [os.path.basename(f) for f in self.job().files
+                       if not (self._geometries.get(path_key(f)) or (0, None))[1]]
+            if missing:
+                names = "\n".join("• " + n for n in missing[:10])
+                more = f"\n… und {len(missing) - 10} weitere" if len(missing) > 10 else ""
+                answer = QMessageBox.question(
+                    self, "Bilder ohne Rahmen",
+                    f"{len(missing)} Bild(er) haben noch keinen Zuschnitt-Rahmen und werden "
+                    f"ungeschnitten gespeichert:\n\n{names}{more}\n\nTrotzdem starten?")
+                if answer != QMessageBox.Yes:
+                    return
         self.accept()
 
     def job(self) -> BatchJob:
         files = [self.list.item(i).data(Qt.UserRole) for i in range(self.list.count())
                  if self.list.item(i).checkState() == Qt.Checked]
+        mode = self.geo_mode.currentData()
         return BatchJob(files, self.folder.text().strip(), self.fmt.currentData(),
-                        self.suffix.text(), self.chk_geo.isChecked(),
-                        self.chk_auto.isChecked())
+                        self.suffix.text(), mode == "same", self.chk_auto.isChecked(),
+                        self._geometries if mode == "own" else None)
 
 
 def run_batch(job: BatchJob, settings: P.Settings, progress=None, cancelled=None,
@@ -150,7 +184,7 @@ def run_batch(job: BatchJob, settings: P.Settings, progress=None, cancelled=None
     os.makedirs(job.folder, exist_ok=True)
     ext = P.EXPORT_FORMATS[job.fmt][1]
     written, errors = [], []
-    s = settings if job.use_geometry else P.Settings(**P.tonal_dict(settings))
+    tonal = P.Settings(**P.tonal_dict(settings))
     for i, src in enumerate(job.files):
         if cancelled and cancelled():
             break
@@ -162,6 +196,13 @@ def run_batch(job: BatchJob, settings: P.Settings, progress=None, cancelled=None
             out = os.path.join(job.folder, stem + job.suffix + ext)
             if os.path.abspath(out) == os.path.abspath(src):
                 out = os.path.join(job.folder, stem + job.suffix + "_1" + ext)
+            if job.use_geometry:
+                s = settings
+            elif job.geometries and path_key(src) in job.geometries:
+                rotation, crop = job.geometries[path_key(src)]
+                s = replace(tonal, rotation=rotation, crop=crop)
+            else:
+                s = tonal
             s_img = s
             if job.auto:
                 geo = P.Settings(rotation=s.rotation, crop=s.crop)

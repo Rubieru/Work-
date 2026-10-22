@@ -12,11 +12,11 @@ from PySide6.QtCore import (QEvent, QObject, QRunnable, QSettings, QSize, QStand
                             QUrl,
                             QThreadPool, QTimer, Signal)
 from PySide6.QtGui import QAction, QDesktopServices, QIcon, QImage, QKeySequence, QPixmap
-from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QButtonGroup, QCheckBox,
+from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QButtonGroup, QCheckBox,
                                QComboBox,
                                QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
                                QInputDialog, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QMainWindow, QMenuBar, QMessageBox,
+                               QListWidgetItem, QMainWindow, QMenu, QMenuBar, QMessageBox,
                                QProgressDialog,
                                QPushButton, QScrollArea, QSpinBox, QSplitter,
                                QStackedWidget, QTabWidget, QToolButton, QVBoxLayout,
@@ -96,7 +96,7 @@ class MainWindow(QMainWindow):
         self._errors_shown = set()
         self._auto_cache = None
         self._last_preset_auto = False
-        self._last_crop_size = None
+        self._last_crop = None   # Rahmen des zuletzt bearbeiteten Bildes (x, y, w, h)
 
         self.pool = QThreadPool.globalInstance()
         self.sig = _Signals()
@@ -178,7 +178,18 @@ class MainWindow(QMainWindow):
         ll.addWidget(self._heading("Bilder"))
         self.image_list = QListWidget()
         self.image_list.setMaximumHeight(170)
+        self.image_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.image_list.setToolTip("Mehrere Bilder markieren: Strg/Umschalt + Klick oder Strg+A.\n"
+                                   "Rechtsklick oder Entf-Taste: markierte Bilder entfernen.\n"
+                                   "✂ = Bild hat einen Zuschnitt-Rahmen.")
         self.image_list.currentRowChanged.connect(self._select_image)
+        self.image_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.image_list.customContextMenuRequested.connect(self._image_list_menu)
+        a_del = QAction("Markierte Bilder entfernen", self.image_list)
+        a_del.setShortcut(QKeySequence.Delete)
+        a_del.setShortcutContext(Qt.WidgetShortcut)
+        a_del.triggered.connect(self.remove_selected)
+        self.image_list.addAction(a_del)
         ll.addWidget(self.image_list)
         open_btn = QPushButton("Bilder öffnen…")
         open_btn.clicked.connect(self.open_files)
@@ -297,6 +308,9 @@ class MainWindow(QMainWindow):
             "Ecke anklicken (die Lupe hilft beim genauen Treffen).\n"
             "Danach Ecken oder Kanten ziehen – die gegenüberliegende Seite bleibt fest. "
             "Neuen Rahmen aufziehen: Umschalttaste + ziehen.\n"
+            "Viele Bilder: einmal Rahmen setzen, „Größe festhalten“ anhaken, dann nur noch "
+            "Bild für Bild den Rahmen hinschieben – am Ende alles mit der "
+            "Stapelverarbeitung speichern.\n"
             "Strg + Mausrad: zum Mauszeiger zoomen. Mausrad: hoch/runter, seitlich kippen: "
             "links/rechts. Rechte Maustaste: Bild verschieben. Der Zuschnitt gilt "
             "sofort, ohne Bestätigen."))
@@ -316,6 +330,12 @@ class MainWindow(QMainWindow):
         self.btn_prev_size.clicked.connect(self._apply_previous_size)
         l0.addWidget(self.btn_prev_size)
         self.chk_lock_size = QCheckBox("Größe festhalten (Rahmen nur verschieben)")
+        self.chk_lock_size.setToolTip(
+            "Der Rahmen behält seine Größe und lässt sich nur verschieben.\n"
+            "Beim Wechsel zu einem Bild ohne Rahmen erscheint er dort automatisch in "
+            "derselben Größe an derselben Stelle – nur noch hinschieben.\n"
+            "Jedes Bild merkt sich seinen Rahmen; die Stapelverarbeitung schneidet alle "
+            "Bilder mit ihrem eigenen Rahmen zu.")
         self.chk_lock_size.setChecked(QSettings().value("lock_crop_size", False, type=bool))
         self.chk_lock_size.toggled.connect(self._on_lock_size)
         l0.addWidget(self.chk_lock_size)
@@ -446,13 +466,6 @@ class MainWindow(QMainWindow):
             "Die wichtigste Verbesserung für flaue historische Luftbilder.")
         self.chk_stretch.toggled.connect(lambda v: self._set_value("stretch", v))
         gl.addWidget(self.chk_stretch)
-        self.chk_keep = QCheckBox("Helligkeit des Originals beibehalten")
-        self.chk_keep.setToolTip(
-            "Nach dem Strecken wird die Bildmitte per Gamma wieder auf die Helligkeit des "
-            "Originals gelegt. Das Bild wird kontrastreicher, aber nicht heller – helle "
-            "Flächen leuchten nicht aus. Schwarz- und Weißpunkt (1–255) bleiben.")
-        self.chk_keep.toggled.connect(lambda v: self._set_value("keep_brightness", v))
-        gl.addWidget(self.chk_keep)
         add(gl, "hist_flat", "Histogramm abflachen", 0, 1, 0.01, 0.0, decimals=0,
             suffix=" %", display_factor=100,
             tooltip="Verteilt die Grauwerte breiter über den ganzen Bereich und flacht die "
@@ -602,7 +615,9 @@ class MainWindow(QMainWindow):
         self.a_export_all = act("Stapelverarbeitung…", self.batch, QKeySequence("Ctrl+B"),
                                 m_file)
         m_file.addSeparator()
-        self.a_close = act("Bild aus Liste entfernen", self.close_current, None, m_file)
+        self.a_close = act("Markierte Bilder aus Liste entfernen", self.remove_selected, None,
+                           m_file)
+        self.a_close_all = act("Alle Bilder aus Liste entfernen", self.remove_all, None, m_file)
         m_file.addSeparator()
         act("Beenden", self.close, QKeySequence.Quit, m_file)
         tb.addSeparator()
@@ -658,7 +673,7 @@ class MainWindow(QMainWindow):
         if row < 0 or row >= len(self.entries):
             return
         if self.entry is not None and self.entry.settings.crop:
-            self._last_crop_size = tuple(self.entry.settings.crop[2:])
+            self._last_crop = tuple(self.entry.settings.crop)
         self.entry = self.entries[row]
         self.doc = None
         self._auto_cache = None
@@ -690,17 +705,71 @@ class MainWindow(QMainWindow):
 
         self._submit("load", load)
 
-    def close_current(self):
-        row = self.image_list.currentRow()
-        if row < 0:
+    def _image_list_menu(self, pos):
+        if not self.entries:
             return
-        self.entries.pop(row)
-        self.image_list.takeItem(row)
+        if self.image_list.itemAt(pos) and not self.image_list.itemAt(pos).isSelected():
+            self.image_list.setCurrentItem(self.image_list.itemAt(pos))
+        menu = QMenu(self)
+        n = len(self.image_list.selectedItems())
+        menu.addAction(f"Entfernen ({n} markiert)" if n > 1 else "Entfernen",
+                       self.remove_selected).setEnabled(n > 0)
+        menu.addAction("Alle entfernen", self.remove_all)
+        menu.addSeparator()
+        menu.addAction("Alle markieren", self.image_list.selectAll)
+        menu.exec(self.image_list.viewport().mapToGlobal(pos))
+
+    def remove_selected(self):
+        rows = sorted({self.image_list.row(i) for i in self.image_list.selectedItems()})
+        if not rows and self.image_list.currentRow() >= 0:
+            rows = [self.image_list.currentRow()]
+        self._remove_rows(rows)
+
+    def remove_all(self):
+        self._remove_rows(list(range(len(self.entries))))
+
+    def close_current(self):
+        if self.image_list.currentRow() >= 0:
+            self._remove_rows([self.image_list.currentRow()])
+
+    def _remove_rows(self, rows):
+        """Bilder aus der Liste nehmen (die Dateien bleiben unverändert)."""
+        if not rows:
+            return
+        current = self.entry
+        removed = {id(self.entries[r]) for r in rows}
+        self.image_list.blockSignals(True)
+        for r in sorted(rows, reverse=True):
+            self.entries.pop(r)
+            self.image_list.takeItem(r)
+        self.image_list.blockSignals(False)
         if not self.entries:
             self.entry = self.doc = None
             self.view.clear()
             self.center.setCurrentIndex(0)
             self._update_enabled()
+            return
+        if current is not None and id(current) not in removed:
+            self.image_list.blockSignals(True)
+            self.image_list.setCurrentRow(self.entries.index(current))
+            self.image_list.blockSignals(False)
+        else:
+            self.entry = None
+            row = min(rows[0], len(self.entries) - 1)
+            self.image_list.blockSignals(True)
+            self.image_list.setCurrentRow(row)
+            self.image_list.blockSignals(False)
+            self._select_image(row)
+
+    def _update_list_item(self, entry):
+        """Kennzeichnung in der Bilderliste: ✂ = mit Zuschnitt."""
+        if entry not in self.entries:
+            return
+        item = self.image_list.item(self.entries.index(entry))
+        name = os.path.basename(entry.path)
+        crop = entry.settings.crop
+        item.setText(f"✂ {name}" if crop else name)
+        item.setToolTip(entry.path + (f"\nZuschnitt {crop[2]} × {crop[3]} px" if crop else ""))
 
     # ================================================================ Hintergrund
     def _submit(self, kind, fn):
@@ -759,10 +828,30 @@ class MainWindow(QMainWindow):
         geo = ", georeferenziert (bleibt beim Speichern erhalten)" if self.doc.geo else ""
         self.statusBar().showMessage(
             f"{os.path.basename(self.entry.path)}: {w} × {h} px, {bits}{dpi}{geo}", 12000)
+        self._carry_crop()
         self._sync_controls()
         self._update_enabled()
         self._on_tab(self.tabs.currentIndex())
         self._t_thumbs.start(0)
+
+    def _carry_crop(self):
+        """Mit "Größe festhalten": ein Bild ohne Rahmen bekommt den Rahmen des vorigen
+        Bildes (gleiche Größe, gleiche Stelle) – er muss nur noch hingeschoben werden."""
+        if not (self.chk_lock_size.isChecked() and self._last_crop
+                and self.entry.settings.crop is None):
+            return
+        w, h = self._canvas()
+        x, y, cw, ch = self._last_crop
+        cw, ch = min(cw, w), min(ch, h)
+        crop = (min(max(0, x), w - cw), min(max(0, y), h - ch), cw, ch)
+        s = replace(self.entry.settings, crop=crop)
+        self.entry.settings = s
+        self.entry.history = [s]
+        self.entry.hist_idx = 0
+        self._update_list_item(self.entry)
+        self.statusBar().showMessage(
+            f"Rahmen {cw} × {ch} px vom vorigen Bild übernommen – jetzt an die richtige "
+            "Stelle schieben.", 10000)
 
     # ================================================================ Rendern
     def _effective(self) -> P.Settings:
@@ -1019,7 +1108,7 @@ class MainWindow(QMainWindow):
         for key, sl in self.sliders.items():
             sl.setValue(getattr(s, key))
         for chk, key in ((self.chk_stretch, "stretch"), (self.chk_invert, "invert"),
-                         (self.chk_center, "stats_center"), (self.chk_keep, "keep_brightness")):
+                         (self.chk_center, "stats_center")):
             chk.blockSignals(True)
             chk.setChecked(getattr(s, key))
             chk.blockSignals(False)
@@ -1041,13 +1130,15 @@ class MainWindow(QMainWindow):
             self.view.set_crop(crop)
             self.view.set_display_rotation(self.entry.settings.rotation)
         self.lbl_size.setText(f"Ausschnitt {crop[2]} × {crop[3]} px")
+        self._update_list_item(self.entry)
 
     def _update_enabled(self):
         has = self.doc is not None
         for w in (self.tabs, self.btn_export, self.btn_batch, self.btn_save_preset,
                   self.preset_list, self.btn_before):
             w.setEnabled(has)
-        for a in (self.a_export, self.a_export_all, self.a_apply_all, self.a_close):
+        for a in (self.a_export, self.a_export_all, self.a_apply_all, self.a_close,
+                  self.a_close_all):
             a.setEnabled(has)
         e = self.entry
         self.a_undo.setEnabled(bool(e and e.hist_idx > 0))
@@ -1056,7 +1147,6 @@ class MainWindow(QMainWindow):
         for k in ("clip_black", "clip_white", "stretch_buffer"):
             self.sliders[k].setEnabled(stretch)
         self.chk_center.setEnabled(stretch)
-        self.chk_keep.setEnabled(stretch)
         item = self.preset_list.currentItem()
         self.btn_del_preset.setEnabled(
             bool(item and item.isSelected() and item.data(Qt.UserRole) in self.user_presets))
@@ -1134,8 +1224,8 @@ class MainWindow(QMainWindow):
 
     def _previous_crop_size(self):
         """Breite/Höhe aus dem zuletzt bearbeiteten anderen Bild (mit Zuschnitt)."""
-        if self._last_crop_size:
-            return self._last_crop_size
+        if self._last_crop:
+            return tuple(self._last_crop[2:])
         idx = self.entries.index(self.entry) if self.entry in self.entries else -1
         others = self.entries[:idx][::-1] + self.entries[idx + 1:]
         for e in others:
@@ -1378,24 +1468,28 @@ class MainWindow(QMainWindow):
         if not self.entry:
             return
         self._commit_history()
-        from .batch import BatchDialog, run_batch
+        from .batch import BatchDialog, path_key, run_batch
         # das aktuelle Bild zuerst, dann alle anderen geöffneten Bilder
         files = [self.entry.path] + [e.path for e in self.entries if e is not self.entry]
+        geometries = {path_key(e.path): (e.settings.rotation, e.settings.crop)
+                      for e in self.entries}
         dlg = BatchDialog(self, os.path.basename(self.entry.path), files,
-                          os.path.dirname(self.entry.path), auto=self._last_preset_auto)
+                          os.path.dirname(self.entry.path), auto=self._last_preset_auto,
+                          geometries=geometries)
         if dlg.exec() != BatchDialog.Accepted:
             return
         job = dlg.job()
         settings, current = self.entry.settings, self.doc
-        # Einstellungen auch für die Bilder in der Liste übernehmen
-        chosen = {os.path.normcase(os.path.abspath(f)) for f in job.files}
+        # Regler (und ggf. den gemeinsamen Rahmen) auch in der Liste übernehmen
+        chosen = {path_key(f) for f in job.files}
         for e in self.entries:
-            if e is not self.entry and os.path.normcase(os.path.abspath(e.path)) in chosen:
+            if e is not self.entry and path_key(e.path) in chosen and not job.auto:
                 e.settings = settings if job.use_geometry else P.with_tonal(
                     e.settings, P.tonal_dict(settings))
                 del e.history[e.hist_idx + 1:]
                 e.history.append(e.settings)
                 e.hist_idx = len(e.history) - 1
+                self._update_list_item(e)
         self._start_progress(f"{len(job.files)} Bilder werden bearbeitet …", cancel=True)
         sig, nodata_safe = self.sig, self.chk_nodata.isChecked()
         self._batch_cancel = False

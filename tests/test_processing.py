@@ -32,7 +32,8 @@ def test_crop_is_clamped():
 
 def test_histogram_stretch_fills_range():
     doc = make_doc()
-    s = P.Settings(stretch=True, clip_black=0.5, clip_white=0.5, protect=False)
+    s = P.Settings(stretch=True, clip_black=0.5, clip_white=0.5, protect=False,
+                   keep_brightness=False)
     out = P.render(doc.prepare(s), s)
     assert out.min() == 0.0 and out.max() == 1.0
     assert np.percentile(out, 5) < 0.15 and np.percentile(out, 95) > 0.85
@@ -254,7 +255,8 @@ def test_keep_brightness_stretches_without_brightening():
     img = np.clip(0.02 + rng.gamma(3.0, 0.12, (400, 500)), 0, 0.8).astype(np.float32)
     doc = P.Document(P.LoadedImage(img, 16, None))
     prep = doc.prepare(P.Settings())
-    base = P.Settings(stretch=True, clip_black=0.1, clip_white=0.05, stats_center=False)
+    base = P.Settings(stretch=True, clip_black=0.1, clip_white=0.05, stats_center=False,
+                      keep_brightness=False)
     lin = P.render(prep, base)
     keep = P.render(prep, replace(base, keep_brightness=True))
     med = float(np.median(img))
