@@ -56,7 +56,7 @@ def test_tiled_render_matches_whole_image(name):
 
 def test_preview_approximates_full_resolution():
     doc = make_doc(1400, 1000)
-    s = P.with_tonal(P.Settings(), BUILTIN_PRESETS["Ungleich belichtet"])
+    s = P.with_tonal(P.Settings(), BUILTIN_PRESETS["Helligkeitsausgleich (Vignettierung)"])
     prep = doc.prepare(s)
     full = P.render(prep, s)
     small = P.render(prep, s, scale=0.25)
@@ -68,20 +68,39 @@ def test_preview_approximates_full_resolution():
 
 def test_region_render_shape():
     doc = make_doc()
-    s = P.with_tonal(P.Settings(), BUILTIN_PRESETS["Details / Auswertung"])
+    s = P.with_tonal(P.Settings(), BUILTIN_PRESETS["Medianfilter + Hochpassfilter"])
     out = P.render(doc.prepare(s), s, (100, 50, 200, 120), 0.5)
     assert out.shape == (60, 100)
 
 
-def test_rotation_keeps_canvas():
+def test_rotation_grows_canvas_and_keeps_whole_image():
+    doc = make_doc()                       # 700 x 500
+    assert doc.prepare(P.Settings(rotation=90)).size == (500, 700)
+    assert doc.prepare(P.Settings(rotation=-180)).size == (700, 500)
+    w, h = doc.prepare(P.Settings(rotation=45)).size
+    assert w > 840 and h > 840             # Ecken werden nicht abgeschnitten
+    np.testing.assert_array_equal(doc.prepare(P.Settings(rotation=90)).base,
+                                  np.rot90(doc.raw, -1))   # verlustfrei, im Uhrzeigersinn
+    np.testing.assert_array_equal(doc.prepare(P.Settings(rotation=-270)).base,
+                                  doc.prepare(P.Settings(rotation=90)).base)
+
+
+def test_crop_follows_rotation():
     doc = make_doc()
-    s = P.Settings(rotation=2.5)
-    assert doc.prepare(s).size == doc.size
+    img = doc.raw.copy()
+    img[100:110, 200:230] = 1.0            # Markierung
+    doc = P.Document(P.LoadedImage(img, 16, None))
+    crop = (190, 90, 50, 30)
+    for angle in (90, 180, -90, 30):
+        c = P.follow_rotation(crop, doc.size, 0, angle)
+        base = doc.prepare(P.Settings(rotation=angle, crop=c)).base
+        assert base.mean() > 0.4, angle    # Markierung liegt weiter im Rahmen
+    assert P.follow_rotation(crop, doc.size, 0, 90)[2:] == (30, 50)
 
 
 def test_save_and_load_roundtrip(tmp_path):
     doc = make_doc()
-    s = P.with_tonal(P.Settings(crop=(0, 0, 300, 200)), BUILTIN_PRESETS["Standard (Bachelorarbeit)"])
+    s = P.with_tonal(P.Settings(crop=(0, 0, 300, 200)), BUILTIN_PRESETS["Streckung + Hochpassfilter"])
     for fmt, (_, ext) in P.EXPORT_FORMATS.items():
         path = str(tmp_path / f"Luftbild_ä_{fmt}{ext}")
         P.export(doc, s, path, fmt)
@@ -210,3 +229,18 @@ def test_flatten_keeps_brightness_and_highlight_detail():
         assert abs(float(np.median(out)) - float(np.median(lin))) < 0.1
         hl = vals.reshape(250, 400) > 0.8      # Zeichnung in den Lichtern bleibt
         assert out[hl].std() > 0.5 * lin[hl].std()
+
+
+def test_median_and_lowpass_filters():
+    doc = make_doc()
+    img = doc.raw.copy()
+    img[100, 100] = 1.0                          # Störpixel
+    doc = P.Document(P.LoadedImage(img, 16, None))
+    out = P.render(doc.prepare(P.Settings()), P.Settings(median=3))
+    assert abs(out[100, 100] - img[99, 100]) < 0.05
+    smooth = P.render(doc.prepare(P.Settings()), P.Settings(lowpass=1.5))
+    assert smooth.std() < img.std()
+    for s in (P.Settings(median=5), P.Settings(lowpass=2.0)):   # nahtlose Kacheln
+        whole = P.to_uint(P.render(doc.prepare(s), s), 16)
+        diff = np.abs(whole.astype(int) - P.render_full(doc, s, bits=16, tile=128).astype(int))
+        assert diff.max() <= 2

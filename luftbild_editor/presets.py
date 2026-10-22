@@ -8,22 +8,14 @@ from .processing import TONAL_FIELDS
 
 # Nur Tonwert-/Filterwerte. Zuschnitt und Drehung bleiben beim Bild.
 #
-# Abgestimmt auf gescannte Schwarz-Weiß-Luftbilder (Reihenmesskammer-Filme):
-# - Histogrammstreckung mit kleinem Abschnitt (0,2–1 %), damit Lichter auf
-#   Dächern/Wegen nicht ausfressen.
-# - Kontrastausgleich (CLAHE, wie das für Weltkriegs-Luftbilder entwickelte
-#   "Multidodging") holt Details aus flauen Bereichen.
-# - Unscharf maskieren mit Radius ~1 px und Stärke ~70 % als Grundwert; die
-#   Schwelle verhindert, dass Filmkorn mitgeschärft wird.
-_SHARP = {"sharpen_amount": 0.6, "sharpen_radius": 1.0, "sharpen_threshold": 0.008}
+# Die Namen sagen, was die Voreinstellung macht. Grundlage aller Voreinstellungen ist die
+# lineare Histogrammstreckung auf 1–255 (schwarzer Scanrahmen zählt nicht mit). Filter
+# werden nur maßvoll eingesetzt, damit die radiometrische Information für die
+# photogrammetrische Einrichtung erhalten bleibt.
 _BASE = {"stretch": True, "clip_black": 0.1, "clip_white": 0.05, "stats_center": True}
+# Hochpassfilter (Unscharf maskieren): Radius 1 px; die Schwelle schont das Filmkorn
+_HP = {"sharpen_amount": 0.7, "sharpen_radius": 1.0, "sharpen_threshold": 0.008}
 
-# Grundlage (nach der Bachelorarbeit zur Bildaufbereitung historischer Luftbilder für die
-# Photogrammetrie): Histogramm über den ganzen Grauwertbereich strecken (Ausgabe 1–255),
-# die Spitze abflachen und nur maßvoll filtern, damit die radiometrische Information für
-# die photogrammetrische Einrichtung erhalten bleibt. Der schwarze Scanrahmen zählt bei
-# allen Messungen nicht mit.
-#
 # "Automatisch" ist ein Platzhalter: die Werte misst das Programm je Bild
 # (processing.auto_tonal).
 AUTO = "Automatisch (empfohlen)"
@@ -38,47 +30,71 @@ def _p(**kw):
 BUILTIN_PRESETS: dict[str, dict] = {
     "Original": {},
     AUTO: {},
-    # wie Abb. 1 der Bachelorarbeit: lineare Streckung auf 1–255. Die Spitze wird dabei
-    # flacher, weil sich dieselben Pixel auf mehr Grauwerte verteilen; die Helligkeits-
-    # verhältnisse (und damit die Zeichnung in den Lichtern) bleiben erhalten.
-    "Standard (Bachelorarbeit)": _p(sharpen_amount=0.4, sharpen_radius=1.0,
-                                    sharpen_threshold=0.01),
-    # --- Varianten des Abflachens (zusätzlich zur Streckung)
-    "Abflachen weich": _p(hist_flat=0.6, hist_mode="glocke", **_SHARP),
-    "Abflachen stark": _p(hist_flat=0.7, hist_mode="gleichmaessig", **_SHARP),
-    "Abflachen schonend": _p(hist_flat=0.8, hist_mode="begrenzt", **_SHARP),
-    "Nur strecken": _p(),
-    # --- nach Bildinhalt
-    "Stadt / Bebauung": _p(hist_flat=0.5, hist_mode="glocke", sharpen_amount=0.9,
-                           sharpen_radius=0.8, sharpen_threshold=0.01),
-    "Wald": _p(hist_flat=0.6, hist_mode="glocke", midtones=0.1, equalize=0.15,
-               sharpen_amount=0.6, sharpen_radius=1.2, sharpen_threshold=0.015),
-    "Wiesen & Felder": _p(hist_flat=0.7, hist_mode="gleichmaessig", equalize=0.25,
-                          sharpen_amount=0.7, sharpen_radius=1.3, sharpen_threshold=0.012),
-    "Wasser / Fluss": _p(hist_flat=0.5, hist_mode="begrenzt", denoise=0.3,
-                         sharpen_amount=0.5, sharpen_radius=1.0, sharpen_threshold=0.02),
-    # --- nach Bildproblem
-    "Flau / kontrastarm": _p(clip_black=0.2, hist_flat=0.8, hist_mode="glocke",
-                             equalize=0.3, **_SHARP),
-    "Details / Auswertung": _p(hist_flat=0.6, hist_mode="glocke", equalize=0.3, clarity=0.1,
-                               sharpen_amount=1.0, sharpen_radius=0.9,
-                               sharpen_threshold=0.012),
-    "Zu dunkel": _p(clip_white=0.1, hist_flat=0.6, hist_mode="glocke", midtones=0.25,
-                    **_SHARP),
-    "Zu hell": _p(clip_black=0.2, clip_white=0.02, hist_flat=0.6, hist_mode="glocke",
-                  midtones=-0.2, **_SHARP),
-    "Ungleich belichtet": _p(flatten=0.6, hist_flat=0.5, hist_mode="glocke", **_SHARP),
-    "Grobkörnig": _p(dust=0.3, denoise=0.5, hist_flat=0.5, hist_mode="glocke",
-                     sharpen_amount=0.5, sharpen_radius=1.5, sharpen_threshold=0.025),
-    "Staub & Kratzer": _p(dust=0.7, denoise=0.15, hist_flat=0.5, hist_mode="glocke",
-                          sharpen_amount=0.5, sharpen_radius=1.0, sharpen_threshold=0.015),
-    "GIS / DGM sicher": {
-        # entspricht dem Gemini-Skript: 0,5/99,5 %, 10 % Puffer,
-        # Unscharf maskieren Sigma 1 / Stärke 50 %
+    # --- Streckung, einzeln und mit je einem Filter
+    "Histogrammstreckung": _p(),
+    "Streckung + Hochpassfilter": _p(**_HP),
+    "Streckung + Tiefpassfilter": _p(lowpass=0.8),
+    "Streckung + Medianfilter": _p(median=3),
+    "Medianfilter + Hochpassfilter": _p(median=3, sharpen_amount=0.9, sharpen_radius=1.2,
+                                        sharpen_threshold=0.01),
+    # --- Histogramm abflachen (zusätzlich zur Streckung)
+    "Abflachen weich (Glockenform)": _p(hist_flat=0.6, hist_mode="glocke"),
+    "Abflachen stark (Ausgleich)": _p(hist_flat=0.7, hist_mode="gleichmaessig"),
+    "Abflachen: Spitze kappen": _p(hist_flat=0.8, hist_mode="begrenzt"),
+    # --- weitere Werkzeuge
+    "Lokaler Kontrastausgleich (CLAHE)": _p(equalize=0.35),
+    "Helligkeitsausgleich (Vignettierung)": _p(flatten=0.6),
+    "Gamma: Mitteltöne aufhellen": _p(midtones=0.25),
+    "Gamma: Mitteltöne abdunkeln": _p(midtones=-0.2),
+    "Staub- & Kratzerfilter": _p(dust=0.7),
+    "Streckung mit 10 % Puffer": {
+        # entspricht dem Gemini-Skript: 0,5/99,5 %, 10 % Puffer, Hochpass Sigma 1 / 50 %
         "stretch": True, "clip_black": 0.5, "clip_white": 0.5, "stats_center": True,
         "stretch_buffer": 0.1, "sharpen_amount": 0.5, "sharpen_radius": 1.0,
     },
-    "Negativ": _p(invert=True, hist_flat=0.6, hist_mode="glocke", **_SHARP),
+    "Negativ umkehren": _p(invert=True),
+}
+
+# Erklärung je Voreinstellung (Tooltip): was sie macht und wofür sie passt
+PRESET_INFO: dict[str, str] = {
+    "Original": "Keine Bearbeitung.",
+    AUTO: "Misst Helligkeit, Kontrast und Filmkorn dieses Bildes: Histogrammstreckung, "
+          "bei sehr spitzem Histogramm leichtes Abflachen, bei starkem Korn Medianfilter, "
+          "danach Hochpassfilter.",
+    "Histogrammstreckung": "Lineare Streckung der Grauwerte auf 1–255, sonst nichts. "
+                           "Für Bilder ohne Bildfehler.",
+    "Streckung + Hochpassfilter": "Streckung, dann Hochpassfilter (Kanten betonen). "
+                                  "Für die meisten Bilder – Bebauung, Wege, Trichterränder "
+                                  "werden deutlicher.",
+    "Streckung + Tiefpassfilter": "Streckung, dann Tiefpassfilter (Mittelwert der Umgebung). "
+                                  "Glättet Rauschen, macht das Bild aber weicher.",
+    "Streckung + Medianfilter": "Streckung, dann Medianfilter 3×3. Entfernt Körnung und "
+                                "einzelne Störpixel, Kanten bleiben erhalten. Gut für Wasser, "
+                                "Wiesen und gleichmäßige Flächen.",
+    "Medianfilter + Hochpassfilter": "Erst Körnung mit dem Medianfilter entfernen, dann "
+                                     "schärfen – für grobkörnige Bilder, die trotzdem scharf "
+                                     "werden sollen.",
+    "Abflachen weich (Glockenform)": "Streckung, dann die Spitze im Histogramm abflachen "
+                                     "(Glockenform um die mittlere Helligkeit). Für sehr "
+                                     "flaue Bilder.",
+    "Abflachen stark (Ausgleich)": "Streckung, dann Histogrammausgleich – annähernd gleich "
+                                   "viele Pixel je Grauwert. Maximaler Kontrast, hellt auf.",
+    "Abflachen: Spitze kappen": "Streckung, nur die höchste Spitze im Histogramm wird "
+                                "gekappt. Für große gleichmäßige Flächen (Wasser, Felder).",
+    "Lokaler Kontrastausgleich (CLAHE)": "Histogrammausgleich je Bildbereich. Holt Details aus "
+                                         "dunklen und flauen Partien, verändert die "
+                                         "Grauwerte aber örtlich unterschiedlich.",
+    "Helligkeitsausgleich (Vignettierung)": "Gleicht dunkle Bildränder und Helligkeitsverläufe "
+                                            "aus, dann Streckung.",
+    "Gamma: Mitteltöne aufhellen": "Streckung, dann Gammakorrektur: mittlere Grautöne heller, "
+                                   "Schwarz und Weiß bleiben. Für dunkle Bilder.",
+    "Gamma: Mitteltöne abdunkeln": "Streckung, dann Gammakorrektur: mittlere Grautöne dunkler. "
+                                   "Für helle Bilder.",
+    "Staub- & Kratzerfilter": "Streckung, dann Ersetzen einzelner heller/dunkler Punkte durch "
+                              "den Median der Umgebung (nur Ausreißer werden verändert).",
+    "Streckung mit 10 % Puffer": "Weichere Streckung (0,5 %/99,5 % mit 10 % Puffer) und "
+                                 "leichter Hochpassfilter – wie das Gemini-Skript.",
+    "Negativ umkehren": "Kehrt ein Negativ um und streckt das Histogramm.",
 }
 
 

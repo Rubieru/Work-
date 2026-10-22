@@ -25,7 +25,8 @@ from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QButtonGroup, QCh
 from . import __version__
 from . import processing as P
 from . import theme
-from .presets import AUTO, BUILTIN_PRESETS, load_user_presets, save_user_presets
+from .presets import (AUTO, BUILTIN_PRESETS, PRESET_INFO, load_user_presets,
+                      save_user_presets)
 from .widgets import CurveWidget, HistogramWidget, ImageView, LabeledSlider
 
 PREVIEW_LONG_SIDE = 2000
@@ -296,7 +297,8 @@ class MainWindow(QMainWindow):
             "Ecke anklicken (die Lupe hilft beim genauen Treffen).\n"
             "Danach Ecken oder Kanten ziehen – die gegenüberliegende Seite bleibt fest. "
             "Neuen Rahmen aufziehen: Umschalttaste + ziehen.\n"
-            "Mausrad: zoomen. Rechte Maustaste: Bild verschieben. Der Zuschnitt gilt "
+            "Strg + Mausrad: zum Mauszeiger zoomen. Mausrad: hoch/runter, seitlich kippen: "
+            "links/rechts. Rechte Maustaste: Bild verschieben. Der Zuschnitt gilt "
             "sofort, ohne Bestätigen."))
 
         g0 = QGroupBox("Rahmen")
@@ -346,11 +348,22 @@ class MainWindow(QMainWindow):
         g2 = QGroupBox("Ausrichten")
         l2 = QVBoxLayout(g2)
         self.sl_rotation = LabeledSlider(
-            "Drehen", -10, 10, 0.05, 0.0, decimals=2, suffix=" °",
-            tooltip="Positive Werte drehen im Uhrzeigersinn. Mit dem Raster lassen sich "
+            "Drehen", -180, 180, 0.05, 0.0, decimals=2, suffix=" °",
+            tooltip="Positive Werte drehen im Uhrzeigersinn (−180° bis +180° = volle "
+                    "Umdrehung). Für kleine Korrekturen den Wert direkt eintippen oder mit "
+                    "den Pfeiltasten in 0,05°-Schritten ändern. Mit dem Raster lassen sich "
                     "Straßen oder Feldgrenzen gerade ausrichten.")
         self.sl_rotation.valueChanged.connect(self._on_rotation)
         l2.addWidget(self.sl_rotation)
+        row = QHBoxLayout()
+        for text, delta, tip in (("↺ 90°", -90, "90° gegen den Uhrzeigersinn"),
+                                 ("↻ 90°", 90, "90° im Uhrzeigersinn"),
+                                 ("180°", 180, "Auf den Kopf drehen")):
+            b = QPushButton(text)
+            b.setToolTip(tip + " (verlustfrei)")
+            b.clicked.connect(lambda _=False, d=delta: self._rotate_by(d))
+            row.addWidget(b)
+        l2.addLayout(row)
         self.chk_grid = QCheckBox("Raster anzeigen")
         self.chk_grid.toggled.connect(self._on_grid)
         l2.addWidget(self.chk_grid)
@@ -368,8 +381,8 @@ class MainWindow(QMainWindow):
         self.histogram = HistogramWidget()
         lay.addWidget(self.histogram)
         lay.addWidget(self._info(
-            "Leertaste gedrückt halten = Original zeigen. Zum Beurteilen der Schärfe "
-            "hineinzoomen – vergrößerte Ausschnitte werden in voller Auflösung berechnet."))
+            "Leertaste gedrückt halten = Original zeigen. Strg + Mausrad = zoomen. Zum "
+            "Beurteilen der Schärfe hineinzoomen – vergrößerte Ausschnitte werden in voller Auflösung berechnet."))
 
         # ---- Umschalter Einfach / Erweitert
         row = QHBoxLayout()
@@ -487,7 +500,7 @@ class MainWindow(QMainWindow):
         gl.addWidget(btn)
         adv_lay.addWidget(g)
 
-        g = QGroupBox("Schärfen")
+        g = QGroupBox("Hochpassfilter (Schärfen)")
         gl = QVBoxLayout(g)
         add(gl, "sharpen_amount", "Stärke", 0, 3, 0.05, 0.0, decimals=0, suffix=" %",
             display_factor=100, tooltip="Wie stark Kanten betont werden.")
@@ -500,12 +513,30 @@ class MainWindow(QMainWindow):
                     "geschärft. Erhöhen, wenn das Korn zu stark wird.")
         adv_lay.addWidget(g)
 
-        g = QGroupBox("Bildfehler")
+        g = QGroupBox("Glätten und Bildfehler")
         gl = QVBoxLayout(g)
+        row = QHBoxLayout()
+        lbl = QLabel("Medianfilter")
+        lbl.setToolTip("Ersetzt jeden Pixel durch den Median seiner Nachbarn: entfernt Körnung "
+                       "und Störpixel, Kanten bleiben erhalten (nichtlinearer Filter).")
+        row.addWidget(lbl)
+        row.addStretch(1)
+        self.median_box = QComboBox()
+        for label, k in (("Aus", 0), ("3 × 3", 3), ("5 × 5", 5)):
+            self.median_box.addItem(label, k)
+        self.median_box.setToolTip(lbl.toolTip())
+        self.median_box.currentIndexChanged.connect(
+            lambda _: self._set_value("median", self.median_box.currentData()))
+        row.addWidget(self.median_box)
+        gl.addLayout(row)
+        add(gl, "lowpass", "Tiefpassfilter (Weichzeichnen)", 0, 3, 0.05, 0.0, decimals=2,
+            suffix=" px",
+            tooltip="Mittelwert der Umgebung (Gauß, Radius in Pixeln): glättet Rauschen, "
+                    "feine Details werden dabei weicher (linearer Filter).")
         add(gl, "dust", "Staub & Kratzer entfernen", 0, 1, 0.01, 0.0, decimals=0,
             suffix=" %", display_factor=100,
             tooltip="Entfernt kleine helle oder dunkle Punkte und feine Kratzer vom Scan.")
-        add(gl, "denoise", "Filmkorn reduzieren", 0, 1, 0.01, 0.0, decimals=0, suffix=" %",
+        add(gl, "denoise", "Filmkorn reduzieren (kantenerhaltend)", 0, 1, 0.01, 0.0, decimals=0, suffix=" %",
             display_factor=100, tooltip="Glättet Korn und Rauschen, Kanten bleiben erhalten.")
         add(gl, "flatten", "Ausleuchtung ausgleichen", 0, 1, 0.01, 0.0, decimals=0,
             suffix=" %", display_factor=100,
@@ -716,14 +747,6 @@ class MainWindow(QMainWindow):
         QApplication.restoreOverrideCursor()
         self.doc, self._crop_qimage, self._crop_scale, self._crop_levels = res
         w, h = self.doc.size
-        for sb in self.spin_crop:
-            sb.blockSignals(True)
-        self.spin_crop[0].setRange(0, w - 1)
-        self.spin_crop[1].setRange(0, h - 1)
-        self.spin_crop[2].setRange(1, w)
-        self.spin_crop[3].setRange(1, h)
-        for sb in self.spin_crop:
-            sb.blockSignals(False)
         bits = f"{self.doc.bits} Bit"
         dpi = f", {self.doc.dpi:.0f} dpi" if self.doc.dpi else ""
         geo = ", georeferenziert (bleibt beim Speichern erhalten)" if self.doc.geo else ""
@@ -981,9 +1004,10 @@ class MainWindow(QMainWindow):
         s = self.entry.settings if self.entry else P.Settings()
         if simple:
             self._sync_simple()
-        self.flat_mode.blockSignals(True)
-        self.flat_mode.setCurrentIndex(max(0, self.flat_mode.findData(s.hist_mode)))
-        self.flat_mode.blockSignals(False)
+        for box, value in ((self.flat_mode, s.hist_mode), (self.median_box, s.median)):
+            box.blockSignals(True)
+            box.setCurrentIndex(max(0, box.findData(value)))
+            box.blockSignals(False)
         self.curve.set_points(s.curve)
         for key, sl in self.sliders.items():
             sl.setValue(getattr(s, key))
@@ -999,10 +1023,11 @@ class MainWindow(QMainWindow):
     def _sync_crop_controls(self):
         if not self.doc:
             return
-        w, h = self.doc.size
+        w, h = self._canvas()
         crop = P.clamp_crop(self.entry.settings.crop, w, h)
-        for sb, v in zip(self.spin_crop, crop):
+        for sb, lo, hi, v in zip(self.spin_crop, (0, 0, 1, 1), (w - 1, h - 1, w, h), crop):
             sb.blockSignals(True)
+            sb.setRange(lo, hi)
             sb.setValue(v)
             sb.blockSignals(False)
         if self.view.mode == "crop":
@@ -1118,7 +1143,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Keine Vorlage",
                                     "Es wurde noch kein anderes Bild zugeschnitten.")
             return
-        w, h = self.doc.size
+        w, h = self._canvas()
         cw, ch = min(size[0], w), min(size[1], h)
         x, y, ow, oh = P.clamp_crop(self.entry.settings.crop, w, h)
         # Mittelpunkt des bisherigen Rahmens beibehalten, dann in das Bild schieben
@@ -1138,7 +1163,7 @@ class MainWindow(QMainWindow):
     def _set_crop(self, crop):
         if not self.doc:
             return
-        w, h = self.doc.size
+        w, h = self._canvas()
         if crop is not None:
             crop = P.clamp_crop(crop, w, h)
             if crop == (0, 0, w, h):
@@ -1164,19 +1189,34 @@ class MainWindow(QMainWindow):
     def _on_aspect(self, _):
         val = self.aspect_box.currentData()
         if val == "orig" and self.doc:
-            w, h = self.doc.size
+            w, h = self._canvas()
             val = w / h
         self.view.aspect = val
         if val and self.doc:
-            x, y, w, h = P.clamp_crop(self.entry.settings.crop, *self.doc.size)
+            x, y, w, h = P.clamp_crop(self.entry.settings.crop, *self._canvas())
             if w / h > val:
                 nw, nh = round(h * val), h
             else:
                 nw, nh = w, round(w / val)
             self._set_crop((x + (w - nw) // 2, y + (h - nh) // 2, nw, nh))
 
+    def _canvas(self) -> tuple[int, int]:
+        """Größe des gedrehten Bildes – darauf bezieht sich der Zuschnitt."""
+        return self.doc.canvas_size(self.entry.settings.rotation)
+
+    def _rotate_by(self, delta):
+        self.sl_rotation.setValue(P.normalize_angle(self.sl_rotation.value() + delta))
+        self._on_rotation(self.sl_rotation.value())
+
     def _on_rotation(self, v):
-        self._set_value("rotation", v)
+        v = P.normalize_angle(v)
+        if not self.entry or self.entry.settings.rotation == v:
+            return
+        s = self.entry.settings
+        crop = P.follow_rotation(s.crop, self.doc.size, s.rotation, v) if self.doc else s.crop
+        self.preset_list.clearSelection()
+        self._set_settings(replace(s, rotation=v, crop=crop))
+        self._sync_crop_controls()
         if self.view.mode == "crop":
             self.view.set_display_rotation(v)
             if v and not self.chk_grid.isChecked():
@@ -1224,10 +1264,8 @@ class MainWindow(QMainWindow):
             item.setSizeHint(self.preset_list.gridSize())
             if name in self.user_presets:
                 item.setToolTip("Eigene Voreinstellung")
-            elif name == AUTO:
-                item.setToolTip("Misst Helligkeit, Kontrast und Filmkorn dieses Bildes und "
-                                "stellt die Regler passend ein – egal ob Stadt, Wald, "
-                                "Wiesen oder Wasser.")
+            elif name in PRESET_INFO:
+                item.setToolTip(PRESET_INFO[name])
             self.preset_list.addItem(item)
 
     def _auto_values(self) -> dict:

@@ -37,20 +37,23 @@ und Bildnummer wird automatisch erkannt und zählt bei Histogramm und Streckung 
 | | **Gradationskurve** | Histogramm von Hand nachbearbeiten: Punkte setzen und ziehen |
 | | Kontrastausgleich je Bildbereich, Mitteltöne, Lokaler Kontrast | Feinabstimmung |
 | Schärfen | Stärke, Radius, Schwelle | Unscharf maskieren (Hochpass). Die Schwelle schont das Filmkorn |
-| Bildfehler | Staub & Kratzer (Median), Filmkorn reduzieren, Ausleuchtung ausgleichen, Negativ umkehren | |
+| Filter & Bildfehler | Medianfilter 3×3/5×5, Tiefpassfilter, Staub & Kratzer, Filmkorn reduzieren, Ausleuchtung ausgleichen, Negativ umkehren | |
 
 Das Histogramm im Programm zeigt Original und Ergebnis untereinander. Eine rote Markierung
 erscheint, wenn Pixel bei 0 oder 255 anstoßen.
 
-**Voreinstellungen:**
-- **Automatisch (empfohlen):** misst jedes Bild und stellt Streckung, Abflachen und Schärfe
-  passend ein.
-- **Standard (Bachelorarbeit):** lineare Histogrammstreckung auf 1–255 wie in Abb. 1, leichtes Schärfen.
-- **Varianten:** Abflachen weich, Abflachen stark, Abflachen schonend, Nur strecken.
-- **Nach Bildinhalt:** Stadt/Bebauung, Wald, Wiesen & Felder, Wasser/Fluss.
-- **Nach Bildproblem:** Flau, Details/Auswertung, Zu dunkel, Zu hell, Ungleich belichtet,
-  Grobkörnig, Staub & Kratzer.
-- **Sonstige:** GIS/DGM sicher (wie das Gemini-Skript), Negativ.
+**Voreinstellungen** (benannt nach dem, was sie tun; Tooltip erklärt, wofür sie passen):
+- **Automatisch (empfohlen):** misst jedes Bild – Streckung, bei Bedarf leichtes Abflachen
+  und Medianfilter, danach Hochpassfilter.
+- **Histogrammstreckung** (linear auf 1–255, wie Abb. 1 der Bachelorarbeit), allein oder
+  mit **Hochpassfilter**, **Tiefpassfilter**, **Medianfilter** bzw. **Medianfilter + Hochpassfilter**.
+- **Abflachen:** weich (Glockenform), stark (Ausgleich), Spitze kappen.
+- **Weitere:** Lokaler Kontrastausgleich (CLAHE), Helligkeitsausgleich (Vignettierung),
+  Gamma aufhellen/abdunkeln, Staub- & Kratzerfilter, Streckung mit 10 % Puffer, Negativ umkehren.
+
+**Bedienung der Ansicht:** Strg + Mausrad zoomt zum Mauszeiger hin, das Mausrad scrollt
+hoch/runter, seitliches Kippen des Rads (oder Umschalt + Rad) scrollt nach links/rechts.
+Drehen ist von −180° bis +180° möglich, dazu Knöpfe für 90°-Schritte (verlustfrei).
 
 **Georeferenzierung:** GeoTIFF-Koordinaten, Koordinatensystem sowie World-Files (.tfw/.jgw/.pgw)
 und .prj bleiben beim Speichern erhalten. Zuschnitt und Drehung werden dabei korrekt

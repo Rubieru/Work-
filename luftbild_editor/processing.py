@@ -22,7 +22,8 @@ import numpy as np
 
 log = logging.getLogger("luftbild_editor")
 
-from .geo import geotiff_tags, output_affine, read_geo, write_sidecars
+from .geo import (geotiff_tags, normalize_angle, output_affine, quarter_turns, read_geo,
+                  rotated_size, rotation_matrix, write_sidecars)
 
 try:  # tifffile liest/schreibt große und 16-Bit-TIFFs inkl. DPI zuverlässig
     import tifffile
@@ -44,7 +45,9 @@ class Settings:
     invert: bool = False           # Negativ umkehren
     flatten: float = 0.0           # Ausleuchtung ausgleichen 0..1
     dust: float = 0.0              # Staub & Kratzer entfernen 0..1
-    denoise: float = 0.0           # Filmkorn reduzieren 0..1
+    denoise: float = 0.0           # Filmkorn reduzieren 0..1 (kantenerhaltend)
+    median: int = 0                # Medianfilter: 0 = aus, 3 = 3×3, 5 = 5×5
+    lowpass: float = 0.0           # Tiefpassfilter (Gauß), Radius in Pixeln 0..3
 
     # Kontrast
     stretch: bool = False          # Histogrammstreckung an/aus
@@ -299,12 +302,16 @@ def _resize_long(img: np.ndarray, long_side: int) -> tuple[np.ndarray, float]:
 
 
 def rotate_image(img: np.ndarray, angle: float) -> np.ndarray:
-    """Dreht um die Bildmitte, Leinwandgröße bleibt gleich."""
-    if abs(angle) < 1e-6:
+    """Dreht um die Bildmitte (positiv = im Uhrzeigersinn). Die Leinwand wächst mit,
+    sodass keine Ecke abgeschnitten wird; Vielfache von 90° sind verlustfrei."""
+    if abs(normalize_angle(angle)) < 1e-6:
         return img
+    k = quarter_turns(angle)
+    if k is not None:
+        return np.ascontiguousarray(np.rot90(img, -k))
     h, w = img.shape
-    m = cv2.getRotationMatrix2D(((w - 1) / 2.0, (h - 1) / 2.0), -angle, 1.0)
-    return cv2.warpAffine(img, m, (w, h), flags=cv2.INTER_CUBIC,
+    nw, nh = rotated_size(w, h, angle)
+    return cv2.warpAffine(img, rotation_matrix(w, h, angle), (nw, nh), flags=cv2.INTER_CUBIC,
                           borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
 
@@ -317,6 +324,27 @@ def clamp_crop(crop, w: int, h: int) -> tuple[int, int, int, int]:
     cw = max(1, min(cw, w - x))
     ch = max(1, min(ch, h - y))
     return x, y, cw, ch
+
+
+def follow_rotation(crop, size: tuple[int, int], old: float, new: float):
+    """Zuschnitt beim Ändern der Drehung mitführen: der Rahmen bleibt über demselben
+    Bildinhalt; bei einer Vierteldrehung werden Breite und Höhe getauscht."""
+    if not crop:
+        return None
+    w, h = size
+    x, y, cw, ch = clamp_crop(crop, *rotated_size(w, h, old))
+    inv = cv2.invertAffineTransform(rotation_matrix(w, h, old))
+    cx, cy = x + (cw - 1) / 2.0, y + (ch - 1) / 2.0
+    sx, sy = inv @ (cx, cy, 1.0)
+    nx, ny = rotation_matrix(w, h, new) @ (sx, sy, 1.0)
+    k = quarter_turns(new - old)
+    if k is not None and k % 2:
+        cw, ch = ch, cw
+    nw, nh = rotated_size(w, h, new)
+    cw, ch = min(cw, nw), min(ch, nh)
+    nx = min(max(0, round(nx - (cw - 1) / 2.0)), nw - cw)
+    ny = min(max(0, round(ny - (ch - 1) / 2.0)), nh - ch)
+    return nx, ny, cw, ch
 
 
 @dataclass
@@ -385,8 +413,12 @@ class Document:
                 self._rot_key = key
             return self._rotated
 
+    def canvas_size(self, angle: float) -> tuple[int, int]:
+        """Größe des gedrehten Bildes (darauf beziehen sich die Zuschnitt-Koordinaten)."""
+        return rotated_size(*self.size, angle)
+
     def prepare(self, s: Settings) -> Prepared:
-        w, h = self.size
+        w, h = self.canvas_size(s.rotation)
         crop = clamp_crop(s.crop, w, h)
         key = (round(s.rotation, 4), crop)
         with self._lock:
@@ -744,16 +776,17 @@ def auto_tonal(prep: Prepared) -> dict:
     tile = as_float(prep.base[y0:y0 + t, x0:x0 + t]).astype(np.float32)
     tile = np.clip((tile - lo) / max(hi - lo, 1e-4), 0, 1).astype(np.float32)
     noise = float(1.4826 * np.median(np.abs(tile - cv2.medianBlur(tile, 3))))
+    # Starkes Korn: erst Medianfilter, dann Hochpass mit höherer Schwelle
     if noise > 0.03:
-        denoise, thr, amount, radius = 0.4, 0.025, 0.5, 1.4
+        median, thr, amount, radius = 3, 0.02, 0.7, 1.2
     elif noise > 0.015:
-        denoise, thr, amount, radius = 0.2, 0.015, 0.55, 1.2
+        median, thr, amount, radius = 0, 0.015, 0.6, 1.1
     else:
-        denoise, thr, amount, radius = 0.0, 0.008, 0.6, 1.0
+        median, thr, amount, radius = 0, 0.008, 0.7, 1.0
     return {
         "stretch": True, "clip_black": 0.1, "clip_white": 0.05, "stats_center": True,
         "hist_flat": round(hist_flat, 2), "hist_mode": "glocke",
-        "midtones": round(midtones, 2), "equalize": 0.1, "denoise": denoise,
+        "midtones": round(midtones, 2), "median": median,
         "sharpen_amount": amount, "sharpen_radius": radius, "sharpen_threshold": thr,
     }
 
@@ -770,8 +803,12 @@ def filter_margin(prep: Prepared, s: Settings) -> int:
         m = max(m, 4 * CLARITY_SIGMA_REL * prep.long_side + 2)
     if s.denoise > 0:
         m = max(m, 2 * (1 + 3 * s.denoise) * 1.5 + 2)
+    if s.lowpass > 0:
+        m = max(m, 4 * s.lowpass + 2)
     if s.dust > 0:
         m += 3
+    if s.median:
+        m += s.median // 2 + 1
     return int(math.ceil(m))
 
 
@@ -792,6 +829,17 @@ def apply_tonal(img: np.ndarray, prep: Prepared, s: Settings, glob: Globals,
         med = cv2.medianBlur(img, 5 if scale >= 0.8 else 3)
         mask = np.abs(img - med) > thr
         img = np.where(mask, med, img)
+    if s.median and scale >= 0.5:
+        # Medianfilter: jeder Pixel wird durch den Median seiner Nachbarn ersetzt –
+        # entfernt Rauschen und Körnung, Kanten bleiben erhalten. In stark verkleinerten
+        # Ansichten ist die Wirkung unsichtbar und würde nur Details verschlucken.
+        k = s.median if scale >= 0.8 else 3
+        img = cv2.medianBlur(img, 5 if k >= 5 else 3)
+    if s.lowpass > 0:
+        # Tiefpassfilter: gewichteter Mittelwert der Umgebung (Weichzeichnen)
+        sigma = s.lowpass * scale
+        if sigma >= 0.3:
+            img = cv2.GaussianBlur(img, (0, 0), sigma, borderType=cv2.BORDER_REFLECT)
     if s.denoise > 0:
         sigma_space = (1 + 3 * s.denoise) * scale
         if sigma_space >= 0.4:
@@ -925,8 +973,8 @@ def export(doc: Document, s: Settings, path: str, fmt: str, progress=None,
     arr = render_full(doc, s, bits=bits, progress=progress, nodata_safe=nodata_safe)
     affine = None
     if doc.geo is not None:
-        w, h = doc.size
-        affine = output_affine(doc.geo, (w, h), s.rotation, clamp_crop(s.crop, w, h))
+        crop = clamp_crop(s.crop, *doc.canvas_size(s.rotation))
+        affine = output_affine(doc.geo, doc.size, s.rotation, crop)
     save_image(path, arr, fmt, doc.dpi, doc.geo, affine)
 
 

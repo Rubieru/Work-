@@ -57,7 +57,7 @@ def test_full_workflow(app, tmp_path, monkeypatch):
     win.tabs.setCurrentIndex(1)
     wait(app)
     item = next(win.preset_list.item(i) for i in range(win.preset_list.count())
-                if win.preset_list.item(i).text() == "Details / Auswertung")
+                if win.preset_list.item(i).text() == "Streckung + Hochpassfilter")
     win._apply_preset_item(item)
     wait(app)
     assert win.entry.settings.stretch and win.entry.settings.sharpen_amount > 0
@@ -70,7 +70,7 @@ def test_full_workflow(app, tmp_path, monkeypatch):
     # Rückgängig stellt die Voreinstellung wieder her
     win._commit_history()
     win.undo()
-    assert win.entry.settings.sharpen_amount == pytest.approx(1.0)
+    assert win.entry.settings.sharpen_amount == pytest.approx(0.7)
 
     # Zoom auf 100 % erzeugt Detailansicht in voller Auflösung
     win.view.actual_size()
@@ -112,7 +112,7 @@ def test_batch(tmp_path):
         P.save_image(str(p), P.to_uint(synthetic_aerial(400 + 10 * i, 300, seed=i), 8), "tif8")
         files.append(str(p))
     files.append(str(tmp_path / "fehlt.tif"))
-    s = P.with_tonal(P.Settings(crop=(10, 10, 200, 150)), BUILTIN_PRESETS["Standard (Bachelorarbeit)"])
+    s = P.with_tonal(P.Settings(crop=(10, 10, 200, 150)), BUILTIN_PRESETS["Streckung + Hochpassfilter"])
     out = tmp_path / "aus"
     written, errors = run_batch(BatchJob(files, str(out), "png", "_b", False), s)
     assert len(written) == 3 and len(errors) == 1
@@ -212,4 +212,53 @@ def test_corner_mode_and_previous_size(app, tmp_path, monkeypatch):
     win._set_crop((5, 7, w, h))
     assert win.entry.settings.crop == (5, 7, 500, 400)
     win.chk_lock_size.setChecked(False)
+    win.close()
+
+
+@pytest.mark.parametrize("tab", [0, 1])
+def test_zoom_keeps_point_under_mouse(app, tmp_path, monkeypatch, tab):
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QWheelEvent
+    from luftbild_editor.main_window import MainWindow
+    monkeypatch.setattr("PySide6.QtCore.QStandardPaths.writableLocation",
+                        lambda *_: str(tmp_path / "cfg"))
+    src = tmp_path / "zoom.tif"
+    P.save_image(str(src), P.to_uint(synthetic_aerial(1600, 1200), 16), "tif16")
+    win = MainWindow()
+    win.resize(1200, 800)
+    win.show()
+    win.add_files([str(src)])
+    wait(app)
+    win.tabs.setCurrentIndex(tab)
+    wait(app)
+    view = win.view
+    vp = view.viewport()
+    view.zoom_by(3.0)   # Bild größer als das Fenster (sonst zentriert Qt es zwangsläufig)
+    app.processEvents()
+    # Maus nicht in der Mitte – mehrmals hinein- und wieder herauszoomen
+    mouse = QPointF(vp.width() * 0.25, vp.height() * 0.7)
+    for steps in (3, 2, 4, -2):
+        target = view.mapToScene(mouse.toPoint())
+        for _ in range(abs(steps)):
+            ev = QWheelEvent(mouse, view.mapToGlobal(mouse), QPoint(),
+                             QPoint(0, 120 if steps > 0 else -120), Qt.NoButton,
+                             Qt.ControlModifier, Qt.NoScrollPhase, False)
+            view.wheelEvent(ev)
+        app.processEvents()
+        now = view.mapFromScene(target)
+        assert abs(now.x() - mouse.x()) <= 2 and abs(now.y() - mouse.y()) <= 2, (steps, now)
+
+    # ohne Strg: Rad scrollt (hoch/runter senkrecht, seitlich gekippt waagerecht)
+    z = view.zoom()
+    hb, vb = view.horizontalScrollBar(), view.verticalScrollBar()
+    hb.setValue((hb.minimum() + hb.maximum()) // 2)
+    vb.setValue((vb.minimum() + vb.maximum()) // 2)
+    for delta, bar in ((QPoint(0, -120), vb), (QPoint(-120, 0), hb)):
+        before = bar.value()
+        ev = QWheelEvent(mouse, view.mapToGlobal(mouse), QPoint(), delta, Qt.NoButton,
+                         Qt.NoModifier, Qt.NoScrollPhase, False)
+        app.sendEvent(vp, ev)
+        app.processEvents()
+        assert bar.value() > before
+    assert view.zoom() == pytest.approx(z)
     win.close()

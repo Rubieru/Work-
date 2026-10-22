@@ -32,18 +32,22 @@ def test_crop_keeps_georeference(tmp_path):
         assert (ds.width, ds.height) == (200, 150)
 
 
-def test_rotation_keeps_georeference(tmp_path):
+@pytest.mark.parametrize("angle", [3.0, 90.0, -135.0])
+def test_rotation_keeps_georeference(tmp_path, angle):
     src = tmp_path / "geo.tif"
     tr = make_geotiff(src)
     doc = P.Document.open(str(src))
-    s = P.Settings(rotation=3.0, crop=(50, 40, 250, 200))
+    s = P.Settings(rotation=angle, crop=(50, 40, 250, 200))
     out = tmp_path / "rot.tif"
     P.export(doc, s, str(out), "tif16")
     with rasterio.open(out) as ds:
         assert ds.crs.to_epsg() == 25832
         otr = ds.transform
     # Ausgabepixel -> Original über die Drehmatrix, beide Wege müssen gleich ankommen
-    m = cv2.getRotationMatrix2D(((400 - 1) / 2, (300 - 1) / 2), -3.0, 1.0)
+    # Drehung um die Bildmitte, Leinwand wächst mit (unabhängig nachgerechnet)
+    nw, nh = P.rotated_size(400, 300, angle)
+    m = cv2.getRotationMatrix2D(((400 - 1) / 2, (300 - 1) / 2), -angle, 1.0)
+    m[:, 2] += ((nw - 400) / 2, (nh - 300) / 2)
     inv = cv2.invertAffineTransform(m)
     for u, v in ((0, 0), (100, 50), (249, 199)):
         xr, yr = u + 50, v + 40                     # Pixelmitte im gedrehten Bild

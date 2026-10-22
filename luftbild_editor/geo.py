@@ -90,15 +90,50 @@ def read_geo(path: str, page=None) -> Geo | None:
     return geo
 
 
+def normalize_angle(angle: float) -> float:
+    """Winkel auf -180..180 Grad."""
+    a = (float(angle) + 180.0) % 360.0 - 180.0
+    return 180.0 if a == -180.0 else a
+
+
+def quarter_turns(angle: float) -> int | None:
+    """Anzahl Vierteldrehungen im Uhrzeigersinn, wenn angle ein Vielfaches von 90° ist."""
+    q = normalize_angle(angle) / 90.0
+    k = round(q)
+    return k % 4 if abs(q - k) < 1e-9 else None
+
+
+def rotated_size(w: int, h: int, angle: float) -> tuple[int, int]:
+    """Größe der Leinwand nach der Drehung: das ganze Bild bleibt sichtbar."""
+    k = quarter_turns(angle)
+    if k is not None:
+        return (h, w) if k % 2 else (w, h)
+    r = np.deg2rad(angle)
+    c, s = abs(np.cos(r)), abs(np.sin(r))
+    return int(np.ceil(w * c + h * s - 1e-6)), int(np.ceil(w * s + h * c - 1e-6))
+
+
+def rotation_matrix(w: int, h: int, angle: float) -> np.ndarray:
+    """2x3-Matrix Quellpixel -> Pixel der gedrehten Leinwand (Mitte auf Mitte)."""
+    nw, nh = rotated_size(w, h, angle)
+    m = cv2.getRotationMatrix2D(((w - 1) / 2.0, (h - 1) / 2.0), -angle, 1.0)
+    m[0, 2] += (nw - w) / 2.0
+    m[1, 2] += (nh - h) / 2.0
+    return m
+
+
 def output_affine(geo: Geo, size: tuple[int, int], rotation: float,
                   crop: tuple[int, int, int, int]) -> np.ndarray:
-    """Abbildung des bearbeiteten Bildes (gedreht + zugeschnitten)."""
+    """Abbildung des bearbeiteten Bildes (gedreht + zugeschnitten).
+
+    size ist die Größe des ungedrehten Originals.
+    """
     w, h = size
     x0, y0 = crop[0], crop[1]
     # Ausgabe-Ecke -> gedrehte Ecke
     T = np.array([[1, 0, x0], [0, 1, y0], [0, 0, 1]], dtype=np.float64)
-    if abs(rotation) > 1e-9:
-        m = cv2.getRotationMatrix2D(((w - 1) / 2.0, (h - 1) / 2.0), -rotation, 1.0)
+    if abs(normalize_angle(rotation)) > 1e-9:
+        m = rotation_matrix(w, h, rotation)
         inv = np.vstack([cv2.invertAffineTransform(m), [0, 0, 1]])
         to_center = np.array([[1, 0, -0.5], [0, 1, -0.5], [0, 0, 1]], dtype=np.float64)
         to_corner = np.array([[1, 0, 0.5], [0, 1, 0.5], [0, 0, 1]], dtype=np.float64)

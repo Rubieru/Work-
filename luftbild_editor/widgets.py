@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (QDoubleSpinBox, QGraphicsPixmapItem, QGraphicsSce
                                QWidget)
 
 from . import theme
+from .geo import rotated_size
 
 ACCENT = QColor(theme.ACCENT)
 
@@ -86,6 +87,21 @@ class LabeledSlider(QWidget):
         self.valueChanged.emit(self.value())
 
 
+def smooth_hist(d: np.ndarray, sigma: float = 2.0) -> np.ndarray:
+    """Histogramm für die Anzeige glätten.
+
+    Wird ein 8-Bit-Bild gestreckt, bleiben zwischen den belegten Grauwerten leere Stufen
+    (Kammstruktur). Das ist normal und ändert nichts am Bild – die Anzeige zeigt deshalb
+    den geglätteten Verlauf. Die Summe (Pixelzahl) bleibt gleich.
+    """
+    d = np.asarray(d, np.float64)
+    r = int(np.ceil(3 * sigma))
+    k = np.exp(-0.5 * (np.arange(-r, r + 1) / sigma) ** 2)
+    k /= k.sum()
+    padded = np.pad(d, r, mode="reflect")
+    return np.convolve(padded, k, mode="valid")
+
+
 class HistogramWidget(QWidget):
     """Histogramm vorher und nachher, wie in Bildbearbeitungsprogrammen (linear).
 
@@ -101,7 +117,8 @@ class HistogramWidget(QWidget):
         self._levels = (0.0, 1.0)
         self.setToolTip("Oben: Original, unten: bearbeitet (schwarzer Rand nicht mitgezählt).\n"
                         "Ziel: breiter, flacher Verlauf über den ganzen Bereich, ohne Spitze\n"
-                        "und ohne Werte genau bei 0 (Schwarz) oder 255 (Weiß).")
+                        "und ohne Werte genau bei 0 (Schwarz) oder 255 (Weiß).\n"
+                        "Der Verlauf ist für die Anzeige geglättet.")
 
     def set_data(self, before, after, levels):
         self._before, self._after, self._levels = before, after, levels
@@ -119,16 +136,20 @@ class HistogramWidget(QWidget):
         if data is not None and data.sum() > 0:
             d = data.astype(np.float64)
             n = len(d)
+            # Randwerte 0/255 nicht in die Nachbarn verschmieren (rote Warnung unten)
+            sm = smooth_hist(np.concatenate([[d[1]], d[1:-1], [d[-2]]]))
+            sm[0], sm[-1] = d[0], d[-1]
             # Höhe: 99,5-%-Wert statt Maximum, damit einzelne Spitzen nicht alles stauchen
-            top = max(np.percentile(d, 99.5), 1.0)
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(70, 80, 78))
-            bw = plot.width() / n
-            for i, v in enumerate(d):
-                hgt = min(v / top, 1.0) * plot.height()
-                if hgt > 0:
-                    p.drawRect(QRectF(plot.left() + i * bw, plot.bottom() - hgt,
-                                      max(bw, 1.0), hgt))
+            top = max(np.percentile(sm, 99.5), 1.0)
+            path = QPainterPath(QPointF(plot.left(), plot.bottom()))
+            for i, v in enumerate(sm):
+                x = plot.left() + (i + 0.5) * plot.width() / n
+                path.lineTo(QPointF(x, plot.bottom() - min(v / top, 1.0) * plot.height()))
+            path.lineTo(QPointF(plot.right(), plot.bottom()))
+            path.closeSubpath()
+            p.setPen(QPen(QColor(50, 60, 58), 1))
+            p.setBrush(QColor(70, 80, 78, 200))
+            p.drawPath(path)
             total = d.sum()
             lo_pct = d[0] / total * 100
             hi_pct = d[-1] / total * 100
@@ -186,7 +207,7 @@ class CurveWidget(QWidget):
         self.update()
 
     def set_histogram(self, hist):
-        self._hist = hist
+        self._hist = None if hist is None else smooth_hist(hist)
         self.update()
 
     def _area(self):
@@ -286,7 +307,7 @@ class CurveWidget(QWidget):
 
 
 class ImageView(QGraphicsView):
-    """Bildanzeige mit Zoom (Mausrad) und pixelgenauem Zuschneiderahmen.
+    """Bildanzeige mit Zoom (Strg + Mausrad) und pixelgenauem Zuschneiderahmen.
 
     Szenenkoordinaten = Pixel des Originals (Zuschneidemodus) bzw. des
     zugeschnittenen Bildes (Bearbeitungsmodus).
@@ -330,7 +351,8 @@ class ImageView(QGraphicsView):
         self.loupe.hide()
         self._drag = None
         self._pan = None
-        self._img_size = (0, 0)
+        self._img_size = (0, 0)     # Leinwand (gedreht) – Koordinaten des Zuschnitts
+        self._src_size = (0, 0)     # angezeigtes Bild vor der Drehung
         self._pix_scale = 1.0
         self._rotation = 0.0
         self._detail_params = None
@@ -343,28 +365,33 @@ class ImageView(QGraphicsView):
     # ---------------------------------------------------------------- Bild
     def set_image(self, qimage, size, scale=1.0, rotation=0.0):
         """qimage zeigt ein Bild der Größe size (w, h) verkleinert um scale."""
-        first = not self._has_image or size != self._img_size
-        self._img_size = size
+        first = not self._has_image or size != self._src_size
+        self._src_size = size
         self._pix_scale = scale
         self.pix_item.setPixmap(QPixmap.fromImage(qimage))
         self.set_display_rotation(rotation)
-        self.scene().setSceneRect(QRectF(0, 0, *size))
         self._has_image = True
         self._update_smoothing()
         if first:
             self.fit()
 
     def _rotation_transform(self, angle):
-        w, h = self._img_size
-        cx, cy = (w - 1) / 2, (h - 1) / 2
+        """Quellbild -> gedrehte Leinwand (wie processing.rotate_image)."""
         if not angle:
             return QTransform()
-        return QTransform.fromTranslate(-cx, -cy) * QTransform().rotate(angle) \
-            * QTransform.fromTranslate(cx, cy)
+        w, h = self._src_size
+        nw, nh = rotated_size(w, h, angle)
+        return QTransform.fromTranslate(-(w - 1) / 2, -(h - 1) / 2) \
+            * QTransform().rotate(angle) \
+            * QTransform.fromTranslate((nw - 1) / 2, (nh - 1) / 2)
 
     def set_display_rotation(self, angle):
         """Schnelle Vorschau der Drehung im Zuschneidemodus (um die Bildmitte)."""
         self._rotation = angle
+        size = rotated_size(*self._src_size, angle) if angle else self._src_size
+        if size != self._img_size:
+            self._img_size = size
+            self.scene().setSceneRect(QRectF(0, 0, *size))
         rot = self._rotation_transform(angle)
         self.pix_item.setTransform(
             QTransform.fromScale(1 / self._pix_scale, 1 / self._pix_scale) * rot)
@@ -416,17 +443,38 @@ class ImageView(QGraphicsView):
         self._update_smoothing()
         self.viewChanged.emit()
 
-    def zoom_by(self, factor):
+    def zoom_by(self, factor, anchor: QPointF | None = None):
+        """Zoomen; der Bildpunkt unter anchor (Viewport-Koordinaten, Standard: Mitte)
+        bleibt an derselben Stelle auf dem Bildschirm."""
         z = self.zoom() * factor
-        if 0.005 <= z <= 40:
-            self.scale(factor, factor)
-            self._update_smoothing()
-            self.viewChanged.emit()
+        if not 0.005 <= z <= 40:
+            return
+        if anchor is None:
+            anchor = QPointF(self.viewport().rect().center())
+        target = self.mapToScene(anchor.toPoint())
+        # Qt merkt sich die Mausposition nur in seiner eigenen Mausbehandlung, die im
+        # Zuschneide-Modus übergangen wird – daher den Zoompunkt selbst nachführen.
+        self.setTransformationAnchor(QGraphicsView.NoAnchor)
+        self.scale(factor, factor)
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        delta = self.mapFromScene(target) - anchor.toPoint()
+        hb, vb = self.horizontalScrollBar(), self.verticalScrollBar()
+        hb.setValue(hb.value() + delta.x())
+        vb.setValue(vb.value() + delta.y())
+        self._update_smoothing()
+        self.viewChanged.emit()
 
     def wheelEvent(self, e):
-        steps = e.angleDelta().y() / 120.0
-        if steps:
-            self.zoom_by(1.25 ** steps)
+        """Strg + Mausrad: zum Mauszeiger hin zoomen. Ohne Strg: Rad hoch/runter scrollt
+        senkrecht, Rad nach links/rechts kippen (oder Umschalt + Rad) scrollt waagerecht."""
+        if e.modifiers() & Qt.ControlModifier:
+            d = e.angleDelta()
+            steps = (d.y() or d.x()) / 120.0
+            if steps:
+                self.zoom_by(1.25 ** steps, e.position())
+            e.accept()
+            return
+        super().wheelEvent(e)
 
     def visible_rect(self) -> QRectF:
         r = self.mapToScene(self.viewport().rect()).boundingRect()
