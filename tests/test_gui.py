@@ -399,3 +399,8 @@ def test_batch_dialog_warns_about_images_without_frame(app, tmp_path, monkeypatc
     dlg._accept()
     assert asked and "b.tif" in asked[0] and "a.tif" not in asked[0]
     assert dlg.result() != B.BatchDialog.Accepted
+    # Fenster ohne Elternfenster vor dem Ende von Qt freigeben (sonst Absturz beim Beenden)
+    dlg.deleteLater()
+    app.processEvents()
+    from PySide6.QtCore import QCoreApplication, QEvent
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
