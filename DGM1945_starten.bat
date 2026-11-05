@@ -1,8 +1,8 @@
 @echo off
 REM ------------------------------------------------------------------
-REM  DGM 1945 ohne QGIS-Oberfläche starten (nutzt das Python von QGIS)
-REM  Aufruf: Konfigurationsdatei(en) per Drag & Drop auf diese Datei ziehen
-REM          oder: DGM1945_starten.bat projekt.ini
+REM  DGM 1945 ohne QGIS-Oberflaeche starten (nutzt das Python von QGIS)
+REM  - Doppelklick: Assistent fragt alle Daten nacheinander ab
+REM  - Einstellungen.ini per Drag & Drop auf diese Datei: erneut rechnen
 REM  QGIS_PFAD bei Bedarf an die eigene Installation anpassen.
 REM ------------------------------------------------------------------
 set "QGIS_PFAD="

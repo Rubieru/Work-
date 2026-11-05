@@ -5,13 +5,16 @@ DGM 1945 – Rekonstruktion der Geländeoberkante 1945 (GOK45)
 
 Automatisierte Prozesskette:
 
-  1. Excel/CSV-Tabelle mit Höhen 1945 einlesen (Kilometrierung, Seite,
-     Abstand zur Achse, Höhe in m ü. NHN – optional Name Sohle/Berme/Deich).
-  2. Kilometrierung der Flussachse (Start-km/-m aus der DBF) übernehmen und die
-     Höhenpunkte über Station + Seite + Abstand senkrecht zur Achse setzen
-     (alternativ: auf Sohle-/Berme-/Deich-Linien).
-  3. Triangulation (Delaunay-TIN, linear) -> GOK45.tif; Flächen ohne
-     Tabellenwerte werden mit dem DGM1 aufgefüllt.
+  1. Daten einlesen: Höhenpunkte 1945 (Punkt-Shape mit Höhe, z.B. HOEHE_FG –
+     oder Tabelle Kilometrierung/Seite/Abstand/Höhe + Achse), Geländelinien,
+     aktuelles DGM1 (fertiges Mosaik oder Einzelkacheln -> Mosaik wird gebaut),
+     optional Untersuchungsgebiet und Sohldaten.
+  2. Optional: Gewässersohle in das aktuelle DGM1 einbrennen (das DGM1 zeigt
+     nur die Wasseroberfläche).
+  3. Höhen entlang der Geländelinien zwischen den Punkten interpolieren
+     (Linien mit Höheninfo "DGM"/"Sohle": Höhen aus dem DGM1).
+  4. Triangulation (Delaunay-TIN, linear); Dreiecke mit Kanten > max_kante
+     und Flächen ohne Daten werden mit dem DGM1 gefüllt -> GOK45.tif
   5. Differenz DGM1 - GOK45 -> Veränderung seit 1945
   6. GOK45 - 8 m -> maximale Bomben-Eindringtiefe (m ü. NHN)
      und Sondiertiefe unter heutiger GOK (DGM1 - (GOK45 - 8 m)).
@@ -21,7 +24,8 @@ QGIS-Installation (OSGeo4W) enthalten. openpyxl wird genutzt, falls
 vorhanden (flexiblere Kopfzeilen-Erkennung), sonst liest GDAL die Excel-Datei.
 
 Nutzung ohne QGIS-Oberfläche:
-    python dgm1945_kern.py konfiguration.ini
+    python dgm1945_kern.py                    (Assistent fragt alle Daten ab)
+    python dgm1945_kern.py konfiguration.ini  (Einstellungen aus Datei)
 """
 
 from __future__ import annotations
@@ -51,9 +55,20 @@ NODATA = -9999.0
 # --------------------------------------------------------------------------
 @dataclass
 class Einstellungen:
-    excel: str                      # Excel (.xlsx/.xls) oder CSV mit Höhen 1945
-    linien: str                     # Linien-Layer (Shape/GPKG) mit Achse + Sohle/Berme/Deich
-    ausgabe_ordner: str
+    ausgabe_ordner: str = ""
+
+    # --- Variante A: bereits verortete Höhenpunkte + Geländelinien ---
+    punkte: str = ""                # Punkt-Layer mit Höhen 1945
+    punkte_hoehe_feld: str = ""     # leer = automatisch (HOEHE_FG, POINT_Z, HOEHE_BS, HOEHE ... / Z)
+    gelaendelinien: str = ""        # Linien, entlang derer zwischen den Punkten interpoliert wird
+    linien_hoehe_feld: str = ""     # Feld mit Höheninfo (leer = automatisch "Hoe_Inf")
+    linien_dgm_werte: str = "dgm,sohle"  # Werte im Höheninfo-Feld, bei denen das DGM1 die Höhe liefert
+    fang_toleranz: float = 0.1      # Punkt gilt als "auf der Linie" bis zu diesem Abstand [m]
+    linien_abstand: float = 1.0     # Punktabstand entlang der Geländelinien [m]
+
+    # --- Variante B: Tabelle (Kilometrierung/Seite/Abstand/Höhe) + Achse ---
+    excel: str = ""                 # Excel (.xlsx/.xls) oder CSV mit Höhen 1945
+    linien: str = ""                # Achse (ggf. mit Sohle/Berme/Deich-Linien)
 
     # Linien-Layer (bei Methode "abstand" genügt die Achse allein)
     linien_typ_feld: str = "typ"    # Attributfeld mit Achse/Sohle/Berme/Deich (fehlt es: alles = Achse)
@@ -68,7 +83,7 @@ class Einstellungen:
     km_punkte: str = ""                 # optional: Punkt-Layer mit km-Steinen (Kalibrierung)
     km_punkte_feld: str = "km"
     km_einheit_m: float = 0.0           # Meter je Einheit der Tabellen-Station (km: 1000, m: 1, 0 = auto)
-    fliessrichtung_km_steigend: bool = True  # links/rechts gelten in Richtung steigender km
+    fliessrichtung_km_steigend: bool = False  # links/rechts in Blickrichtung steigender km (False: fallender km)
 
     # Tabelle
     excel_blatt: str = ""
@@ -91,10 +106,20 @@ class Einstellungen:
     verdichtung: float = 5.0        # Zwischenprofile bzw. Verdichtung entlang der Linien alle x m (0 = aus)
 
     # Raster
-    dgm1: list = field(default_factory=list)   # DGM1-Kacheln (GeoTIFF, XYZ, ASC ...) oder Ordner
+    dgm1: list = field(default_factory=list)   # DGM1: Mosaik oder Einzelkacheln (GeoTIFF, XYZ, ASC ...) / Ordner
+    dgm1_mosaik_speichern: bool = True  # aus Einzelkacheln gebautes Mosaik als DGM1_Mosaik.tif ablegen
+    untersuchungsgebiet: str = ""   # optional: Polygon – Ausdehnung der Ergebnisse
+    max_kante: float = 50.0         # Dreiecke mit längerer Kante werden verworfen (dort DGM1); 0 = aus
+
+    # Sohle ins aktuelle DGM1 einbrennen (optional)
+    sohle: str = ""                 # Linien (oder Punkte) mit Sohlhöhen
+    sohle_hoehe_feld: str = ""      # leer = Z-Werte der Geometrie bzw. automatisch
+    sohle_puffer: float = 0.0       # halbe Sohlbreite [m] um die Sohllinie
+    gewaesser: str = ""             # optional: Polygon der Wasserfläche (Böschung zur Sohle interpolieren)
+    sohle_nur_tiefer: bool = True   # nur einbrennen, wo die Sohle tiefer als das DGM1 liegt
     pixelgroesse: float = 1.0       # nur falls kein DGM1 angegeben
     maske: str = ""                 # optional: Polygon zum Zuschneiden des TIN
-    auto_maske: bool = True         # TIN auf Korridor zwischen äußersten Linien begrenzen
+    auto_maske: bool = True         # (Tabelle+Achse) TIN auf Korridor der Profile begrenzen
     masken_klasse: float = 10.0     # Stationsabstand (m) für die automatische Korridormaske
     dgm1_auffuellen: bool = True    # Flächen ohne Tabellenwerte mit DGM1 füllen
     auffuell_puffer: float = 20.0   # Füllbereich = Achse gepuffert um (max. Abstand + x m)
@@ -188,7 +213,7 @@ def typ_passt(tabellen_typ: str, linien_typ: str) -> bool:
 _KW = {
     "km": ["km", "station", "stat", "kilometrie", "kilometr", "fluss km", "stationierung"],
     "hoehe": ["hoehe", "hohe", "nhn", "nn", "z", "kote", "hoehen"],
-    "seite": ["seite", "ufer"],
+    "seite": ["seite", "ufer", "flussachse", "lage zur achse"],
     "abstand": ["abstand", "offset", "entfernung", "achsabstand", "dist"],
     "jahr": ["jahr", "planjahr", "aufnahmejahr"],
     "name": ["name", "bezeichnung", "typ", "art", "objekt", "element", "schluessel"],
@@ -927,6 +952,379 @@ def _polygon_schreiben(pfad, poly, srs):
 
 
 # --------------------------------------------------------------------------
+# Variante A: Höhenpunkte (Punkt-Layer) + Geländelinien
+# --------------------------------------------------------------------------
+_PUNKT_HOEHEN = ["hoehe fg", "point z", "z wert", "hoehe bs", "hoehe 1945", "hoehe45", "hoehe", "hoehe nhn",
+                 "z", "hohe", "nhn"]
+_JAHR_FELDER = ["jahr", "planjahr", "aufnahmejahr"]
+_INFO_FELDER = ["hoe inf", "hoehe inf", "hoeheninfo", "hoehen info", "hoehe info", "hoeheninformation",
+                "hoehenquelle", "quelle hoehe"]
+
+
+def _felder(lyr):
+    d = lyr.GetLayerDefn()
+    return [d.GetFieldDefn(i).GetName() for i in range(d.GetFieldCount())]
+
+
+def _feld_waehlen(felder, vorgabe, kandidaten, gueltig=None):
+    """Feldname nach Vorgabe (exakt) oder erster Kandidat mit überwiegend gültigen Werten."""
+    if vorgabe:
+        for f in felder:
+            if norm(f) == norm(vorgabe):
+                return f
+        raise ValueError(f"Feld '{vorgabe}' nicht vorhanden. Felder: {felder}")
+    normiert = {norm(f): f for f in felder}
+    for k in kandidaten:
+        f = normiert.get(k)
+        if f and (gueltig is None or gueltig(f)):
+            return f
+    return None
+
+
+def punkte_layer_lesen(e: Einstellungen, log: Logger):
+    """Bereits verortete Höhenpunkte 1945 (Punkt-Shape/GPKG) einlesen."""
+    ds, lyr = _vektor_oeffnen(e.punkte)
+    srs = lyr.GetSpatialRef()
+    felder = _felder(lyr)
+    roh = []
+    for f in lyr:
+        g = f.GetGeometryRef()
+        if g is None:
+            continue
+        if g.GetGeometryName() == "MULTIPOINT":
+            g = g.GetGeometryRef(0)
+        roh.append((g.GetX(), g.GetY(), g.GetZ() if g.Is3D() else 0.0,
+                    {k: f.GetField(k) for k in felder}))
+    if not roh:
+        raise ValueError(f"Keine Punkte in {e.punkte}")
+
+    def gueltig(fname):
+        werte = [zahl(r[3][fname]) for r in roh]
+        return sum(1 for v in werte if v is not None and v != 0) >= 0.5 * len(roh)
+
+    feld = _feld_waehlen(felder, e.punkte_hoehe_feld, _PUNKT_HOEHEN, gueltig)
+    jahr_feld = _feld_waehlen(felder, "", _JAHR_FELDER)
+    if feld is None and sum(1 for r in roh if r[2]) >= 0.5 * len(roh):
+        quelle = "Z-Wert der Geometrie"
+    elif feld is None:
+        raise ValueError(f"Kein Höhenfeld in den Punkten gefunden – bitte angeben. Felder: {felder}")
+    else:
+        quelle = f"Feld '{feld}'"
+    punkte, leer = [], 0
+    for x, y, z, attr in roh:
+        h = zahl(attr[feld]) if feld else z
+        if h is None or h == 0:
+            leer += 1
+            continue
+        punkte.append(Punkt(x, y, float(h), float("nan"), "", "", -1, "punkt",
+                            jahr=zahl(attr[jahr_feld]) if jahr_feld else None))
+    log(f"Punkte: {len(punkte)} Höhenpunkte aus {os.path.basename(e.punkte.split('|')[0])}, "
+        f"Höhe aus {quelle}" + (f", {leer} ohne Höhe übersprungen" if leer else ""))
+    return punkte, (srs.Clone() if srs else None)
+
+
+def gelaendelinien_lesen(e: Einstellungen, log: Logger):
+    ds, lyr = _vektor_oeffnen(e.gelaendelinien)
+    felder = _felder(lyr)
+    info_feld = _feld_waehlen(felder, e.linien_hoehe_feld, _INFO_FELDER)
+    dgm_werte = [norm(v) for v in e.linien_dgm_werte.split(",") if v.strip()]
+    linien, n_dgm = [], 0
+    for f in lyr:
+        g = f.GetGeometryRef()
+        if g is None:
+            continue
+        info = str(f.GetField(info_feld) or "") if info_feld else ""
+        aus_dgm = any(w in norm(info) for w in dgm_werte) if info else False
+        n_dgm += aus_dgm
+        for pts in _linien_aus_geom(g):
+            if len(pts) >= 2:
+                l = Polylinie(pts, "dgm" if aus_dgm else "", "", f.GetFID(), info)
+                if l.laenge > 0:
+                    linien.append(l)
+    log(f"Geländelinien: {len(linien)} Linien, {sum(l.laenge for l in linien)/1000:.1f} km"
+        + (f"; {n_dgm} mit Höheninfo aus DGM1 (Feld '{info_feld}')" if info_feld else
+           " (kein Höheninfo-Feld gefunden)"))
+    return linien
+
+
+def gelaendelinien_verdichten(e: Einstellungen, punkte, linien, dgm_wert, log: Logger):
+    """Punkte alle `linien_abstand` m entlang jeder Geländelinie.
+
+    Höhe linear zwischen den Höhenpunkten, die auf der Linie liegen (Abstand < fang_toleranz);
+    über das letzte Punktpaar hinaus konstant. Linien mit Höheninfo 'DGM'/'Sohle' und Linien
+    ohne Höhenpunkte erhalten die Höhen aus dem (ggf. um die Sohle ergänzten) DGM1.
+    """
+    P = np.array([[p.x, p.y] for p in punkte])
+    Z = np.array([p.hoehe for p in punkte])
+    tol = e.fang_toleranz
+    neu = []
+    n_pkt = n_dgm = n_ohne = n_leer = 0
+    for l in linien:
+        ms = np.unique(np.r_[np.arange(0.0, l.laenge, max(e.linien_abstand, 0.01)), l.cum, l.laenge])
+        xy = l.punkt(ms).T
+        bekannt = np.empty(0)
+        if l.typ == "dgm":
+            z, quelle = dgm_wert(xy), "linie_dgm"
+            n_dgm += 1
+        else:
+            x0, y0 = l.c.min(0) - tol
+            x1, y1 = l.c.max(0) + tol
+            kand = np.where((P[:, 0] >= x0) & (P[:, 0] <= x1) & (P[:, 1] >= y0) & (P[:, 1] <= y1))[0]
+            if kand.size:
+                mk, dk = l.stationen_versatz(P[kand])
+                auf = np.abs(dk) < tol
+                kand, mk = kand[auf], mk[auf]
+            if kand.size:
+                werte = {}
+                for m, i in zip(mk, kand):
+                    werte.setdefault(round(float(m), 3), []).append(Z[i])
+                bekannt = np.array(sorted(werte))
+                zk = np.array([np.mean(werte[m]) for m in bekannt])
+                z, quelle = np.interp(ms, bekannt, zk), "linie"
+                n_pkt += 1
+            else:
+                z, quelle = dgm_wert(xy), "linie_dgm"
+                n_ohne += 1
+        if bekannt.size:
+            frei = np.min(np.abs(ms[:, None] - bekannt[None, :]), axis=1) > 0.01
+        else:
+            frei = np.ones(len(ms), bool)
+        ok = frei & np.isfinite(z)
+        if not ok.any():
+            n_leer += 1
+        for (x, y), h in zip(xy[ok], z[ok]):
+            neu.append(Punkt(float(x), float(y), float(h), float("nan"), l.typ_original, "", -1, quelle))
+    log(f"Geländelinien: {len(neu)} Zusatzpunkte (alle {e.linien_abstand:g} m) – {n_pkt} Linien zwischen "
+        f"Höhenpunkten interpoliert, {n_dgm} Linien aus DGM1"
+        + (f", {n_ohne} Linien ohne Höhenpunkt -> Höhen aus DGM1" if n_ohne else "")
+        + (f", {n_leer} Linien ohne Werte (außerhalb DGM1?)" if n_leer else ""))
+    return neu
+
+
+def _datenflaeche(punkte, linien, puffer):
+    """Puffer um alle Punkte und Linien; von Linien umschlossene Flächen werden gefüllt."""
+    teile = ogr.Geometry(ogr.wkbMultiPolygon)
+
+    def dazu(g):
+        if g.GetGeometryName() == "MULTIPOLYGON":
+            for i in range(g.GetGeometryCount()):
+                teile.AddGeometry(g.GetGeometryRef(i))
+        elif g.GetGeometryName() == "POLYGON":
+            teile.AddGeometry(g)
+
+    for l in linien:
+        dazu(l.geom.Buffer(puffer, 4))
+    mp = ogr.Geometry(ogr.wkbMultiPoint)
+    for p in punkte:
+        q = ogr.Geometry(ogr.wkbPoint)
+        q.AddPoint_2D(p.x, p.y)
+        mp.AddGeometry(q)
+    dazu(mp.Buffer(puffer, 4))
+    vereint = teile.UnionCascaded()
+    ohne_loecher = ogr.Geometry(ogr.wkbMultiPolygon)
+    polys = [vereint] if vereint.GetGeometryName() == "POLYGON" else \
+        [vereint.GetGeometryRef(i) for i in range(vereint.GetGeometryCount())]
+    for poly in polys:
+        neu = ogr.Geometry(ogr.wkbPolygon)
+        neu.AddGeometry(poly.GetGeometryRef(0).Clone())
+        ohne_loecher.AddGeometry(neu)
+    return ohne_loecher.UnionCascaded()
+
+
+def _xy_eindeutig(punkte):
+    """Doppelte Lagen (1 cm) entfernen – der erste Punkt (Höhenpunkt vor Linienpunkt) bleibt."""
+    gesehen, aus = set(), []
+    for p in punkte:
+        k = (round(p.x, 2), round(p.y, 2))
+        if k not in gesehen:
+            gesehen.add(k)
+            aus.append(p)
+    return aus
+
+
+# --------------------------------------------------------------------------
+# DGM1: Mosaik, Sohle, Kantenlängen-Maske
+# --------------------------------------------------------------------------
+def dgm_vorbereiten(e: Einstellungen, log: Logger):
+    """Mosaik aus Einzelkacheln bauen bzw. fertiges Mosaik verwenden. Rückgabe: Pfad oder None."""
+    dateien = _dgm1_quellen(e.dgm1)
+    if not dateien:
+        return None
+    if len(dateien) == 1:
+        log(f"DGM1: Mosaik {os.path.basename(dateien[0])}")
+        return dateien[0]
+    vrt_pfad = os.path.join(e.ausgabe_ordner, "DGM1_Mosaik.vrt")
+    vrt = gdal.BuildVRT(vrt_pfad, dateien)
+    if vrt is None:
+        raise ValueError("DGM1-Kacheln konnten nicht zu einem Mosaik zusammengefügt werden.")
+    log(f"DGM1: Mosaik aus {len(dateien)} Kacheln gebaut ({vrt.RasterXSize} x {vrt.RasterYSize} Pixel)")
+    if not e.dgm1_mosaik_speichern:
+        vrt = None
+        return vrt_pfad
+    tif = os.path.join(e.ausgabe_ordner, "DGM1_Mosaik.tif")
+    gdal.Translate(tif, vrt, creationOptions=["COMPRESS=DEFLATE", "PREDICTOR=3", "TILED=YES",
+                                              "BIGTIFF=IF_SAFER"])
+    vrt = None
+    log("-> DGM1_Mosaik.tif")
+    return tif
+
+
+def _layer_aus_geom(geoms, srs, typ=ogr.wkbPolygon):
+    mds = gdal.GetDriverByName("Memory").Create("", 0, 0, 0, gdal.GDT_Unknown)
+    ml = mds.CreateLayer("m", srs, typ)
+    for g in geoms:
+        f = ogr.Feature(ml.GetLayerDefn())
+        f.SetGeometry(g)
+        ml.CreateFeature(f)
+    return mds, ml
+
+
+def _punkte_ds(xyz, srs):
+    """In-Memory-Punktlayer (für gdal.Grid)."""
+    mds = gdal.GetDriverByName("Memory").Create("", 0, 0, 0, gdal.GDT_Unknown)
+    ml = mds.CreateLayer("p", srs, ogr.wkbPoint)
+    ml.CreateField(ogr.FieldDefn("z", ogr.OFTReal))
+    ml.StartTransaction()
+    for x, y, z in xyz:
+        f = ogr.Feature(ml.GetLayerDefn())
+        f.SetField("z", float(z))
+        g = ogr.Geometry(ogr.wkbPoint)
+        g.AddPoint_2D(float(x), float(y))
+        f.SetGeometry(g)
+        ml.CreateFeature(f)
+    ml.CommitTransaction()
+    return mds
+
+
+def _grid(xyz, srs, algorithmus, breite, hoehe, gt):
+    mds = _punkte_ds(xyz, srs)
+    xmin, ymax = gt[0], gt[3]
+    xmax, ymin = xmin + breite * gt[1], ymax + hoehe * gt[5]
+    r = gdal.Grid("", mds, format="MEM", outputType=gdal.GDT_Float64, outputBounds=[xmin, ymax, xmax, ymin],
+                  width=breite, height=hoehe, algorithm=algorithmus, zfield="z", layers=["p"])
+    a = r.GetRasterBand(1).ReadAsArray()
+    a[a == NODATA] = np.nan
+    return a
+
+
+def sohle_einbrennen(e: Einstellungen, dgm, gt, srs, srs_wkt, log: Logger):
+    """Gewässersohle in das DGM1 einsetzen (DGM1 zeigt nur die Wasseroberfläche)."""
+    hoehe_px, breite_px = dgm.shape
+    ds, lyr = _vektor_oeffnen(e.sohle)
+    felder = _felder(lyr)
+    feld = _feld_waehlen(felder, e.sohle_hoehe_feld,
+                         ["sohle", "sohlhoehe", "sohlenhoehe", "hoehe sohle", "sohle nhn", "z wert", "hoehe", "z"])
+    pts, geoms = [], []
+    for f in lyr:
+        g = f.GetGeometryRef()
+        if g is None:
+            continue
+        fh = zahl(f.GetField(feld)) if feld else None
+        name = g.GetGeometryName()
+        if "POINT" in name:
+            for i in range(max(g.GetGeometryCount(), 1)):
+                q = g.GetGeometryRef(i) if g.GetGeometryCount() else g
+                z = fh if fh is not None else (q.GetZ() if q.Is3D() else None)
+                if z:
+                    pts.append((q.GetX(), q.GetY(), z))
+            continue
+        geoms.append(g.Clone())
+        for teil in (g.GetGeometryRef(i) for i in range(g.GetGeometryCount())) if "MULTI" in name else [g]:
+            c = np.array(teil.GetPoints())
+            l = Polylinie(c)
+            if l.laenge == 0:
+                continue
+            z_v = c[:, 2] if c.shape[1] > 2 and np.any(c[:, 2]) else None
+            if z_v is None and fh is None:
+                continue
+            ms = np.unique(np.r_[np.arange(0, l.laenge, 1.0), l.laenge])
+            keep = np.r_[True, np.any(np.abs(np.diff(c[:, :2], axis=0)) > 1e-9, axis=1)]
+            z = np.interp(ms, l.cum, z_v[keep]) if z_v is not None else np.full(len(ms), fh)
+            for (x, y), h in zip(l.punkt(ms).T, z):
+                pts.append((x, y, h))
+    if not pts:
+        raise ValueError("Sohle: keine Höhen gefunden (Z-Werte der Linien oder Höhenfeld angeben).")
+    pts = np.array(pts)
+    px = gt[1]
+    # Sohlstreifen
+    if geoms:
+        streifen = [g.Buffer(max(e.sohle_puffer, 0.5 * px)) for g in geoms]
+    else:
+        streifen = [ogr.CreateGeometryFromWkt(f"POINT ({x} {y})").Buffer(max(e.sohle_puffer, 0.5 * px))
+                    for x, y, _ in pts]
+    _m, sl = _layer_aus_geom(streifen, srs)
+    in_streifen = _maske_layer(sl, breite_px, hoehe_px, gt, srs_wkt)
+    r = max(e.sohle_puffer, px) + px
+    s = _grid(pts, srs, f"nearest:radius1={r}:radius2={r}:nodata={NODATA}", breite_px, hoehe_px, gt)
+    ziel = np.where(in_streifen, s, np.nan)
+    # Böschung zwischen Sohlstreifen und Rand der Wasserfläche
+    if e.gewaesser:
+        gds, gl = _vektor_oeffnen(e.gewaesser)
+        im_gew = _maske_layer(gl, breite_px, hoehe_px, gt, srs_wkt)
+        rand = []
+        for f in gl:
+            g = f.GetGeometryRef()
+            if g is None:
+                continue
+            b = g.GetBoundary()
+            for teil in (b.GetGeometryRef(i) for i in range(b.GetGeometryCount())) if b.GetGeometryCount() else [b]:
+                l = Polylinie(np.array(teil.GetPoints()))
+                if l.laenge:
+                    rand.append(l.punkt(np.arange(0, l.laenge, 1.0)).T)
+        if rand:
+            rand = np.vstack(rand)
+            c = np.floor((rand[:, 0] - gt[0]) / gt[1]).astype(int)
+            rr = np.floor((rand[:, 1] - gt[3]) / gt[5]).astype(int)
+            ok = (c >= 0) & (c < breite_px) & (rr >= 0) & (rr < hoehe_px)
+            rz = np.full(len(rand), np.nan)
+            rz[ok] = dgm[rr[ok], c[ok]]
+            ok &= np.isfinite(rz)
+            b = _grid(np.vstack([pts, np.c_[rand[ok], rz[ok]]]), srs, f"linear:radius=0:nodata={NODATA}",
+                      breite_px, hoehe_px, gt)
+            ziel = np.where(im_gew & ~in_streifen, b, ziel)
+    setzen = np.isfinite(ziel) & np.isfinite(dgm)
+    if e.sohle_nur_tiefer:
+        setzen &= ziel < dgm
+    neu = dgm.copy()
+    neu[setzen] = ziel[setzen]
+    if setzen.any():
+        log(f"Sohle: {setzen.sum() * px * px:,.0f} m² des DGM1 durch Sohlhöhen ersetzt, "
+            f"im Mittel {np.mean(dgm[setzen] - ziel[setzen]):.2f} m tiefer"
+            + (" (inkl. Böschung bis Rand Wasserfläche)" if e.gewaesser else ""))
+    else:
+        log("WARNUNG Sohle: keine DGM1-Zelle verändert (Sohle höher als DGM1 oder außerhalb?)")
+    return neu
+
+
+def _maske_layer(lyr, breite, hoehe, gt, srs_wkt):
+    mem = gdal.GetDriverByName("MEM").Create("", breite, hoehe, 1, gdal.GDT_Byte)
+    mem.SetGeoTransform(gt)
+    mem.SetProjection(srs_wkt)
+    gdal.RasterizeLayer(mem, [1], lyr, burn_values=[1])
+    return mem.GetRasterBand(1).ReadAsArray() == 1
+
+
+def lange_dreiecke_maske(punkte, max_kante, breite, hoehe, gt, srs, srs_wkt):
+    """Maske der Pixel in Delaunay-Dreiecken mit einer Kante > max_kante (dort keine Interpolation)."""
+    mp = ogr.Geometry(ogr.wkbMultiPoint)
+    for p in punkte:
+        q = ogr.Geometry(ogr.wkbPoint)
+        q.AddPoint_2D(p.x, p.y)
+        mp.AddGeometry(q)
+    tri = mp.DelaunayTriangulation(0.0, False)
+    lang = []
+    for i in range(tri.GetGeometryCount()):
+        t = tri.GetGeometryRef(i)
+        c = np.array(t.GetGeometryRef(0).GetPoints())[:, :2]
+        if np.max(np.hypot(*np.diff(c, axis=0).T)) > max_kante:
+            lang.append(t.Clone())
+    if not lang:
+        return np.zeros((hoehe, breite), bool), 0
+    _m, ml = _layer_aus_geom(lang, srs)
+    return _maske_layer(ml, breite, hoehe, gt, srs_wkt), len(lang)
+
+
+# --------------------------------------------------------------------------
 # Raster
 # --------------------------------------------------------------------------
 def _dgm1_quellen(liste):
@@ -991,6 +1389,10 @@ def _maske_rastern(geom_oder_pfad, breite, hoehe, gt, srs, srs_wkt):
 def ausfuehren(e: Einstellungen, log: Logger = print, fortschritt: Callable[[float], None] = None) -> dict:
     """Komplette Prozesskette. Gibt Dict mit den Pfaden der Ergebnisse zurück."""
     fs = fortschritt or (lambda x: None)
+    if not e.ausgabe_ordner:
+        raise ValueError("Kein Ausgabeordner angegeben.")
+    if not (e.punkte or e.excel):
+        raise ValueError("Keine Höhendaten 1945 angegeben (Punkt-Layer oder Tabelle + Achse).")
     os.makedirs(e.ausgabe_ordner, exist_ok=True)
     protokoll = []
 
@@ -999,80 +1401,81 @@ def ausfuehren(e: Einstellungen, log: Logger = print, fortschritt: Callable[[flo
         log(msg)
 
     lg("=== DGM 1945 Rekonstruktion ===")
-    werte = tabelle_lesen(e, lg)
-    methode = e.methode
-    if methode == "auto":
-        methode = "abstand" if any(w.abstand is not None for w in werte) else "lot"
-    lg(f"Methode: {methode}")
-    fs(5)
-    achse, linien, srs, attr = linien_lesen(e, methode, lg)
+    # ---------------- 1. Daten einlesen ----------------
+    achse, linien, attr, werte = None, [], {}, None
+    if e.punkte:
+        methode = "punkte"
+        punkte, srs = punkte_layer_lesen(e, lg)
+    else:
+        werte = tabelle_lesen(e, lg)
+        methode = e.methode
+        if methode == "auto":
+            methode = "abstand" if any(w.abstand is not None for w in werte) else "lot"
+        lg(f"Methode: {methode}")
+        achse, linien, srs, attr = linien_lesen(e, methode, lg)
+    gl = gelaendelinien_lesen(e, lg) if e.gelaendelinien else []
+    dgm_pfad = dgm_vorbereiten(e, lg)
+    fs(10)
 
-    dgm_dateien = _dgm1_quellen(e.dgm1)
-    vrt_pfad = os.path.join(e.ausgabe_ordner, "DGM1_mosaik.vrt")
     dgm_srs_wkt = ""
-    if dgm_dateien:
-        vrt = gdal.BuildVRT(vrt_pfad, dgm_dateien)
-        gt0 = vrt.GetGeoTransform()
+    if dgm_pfad:
+        q = gdal.Open(dgm_pfad)
+        gt0 = q.GetGeoTransform()
         px, py, ox, oy = gt0[1], abs(gt0[5]), gt0[0], gt0[3]
-        dgm_srs_wkt = vrt.GetProjection()
-        vrt = None
-        lg(f"DGM1: {len(dgm_dateien)} Datei(en), Pixel {px:g} m")
+        dgm_srs_wkt = q.GetProjection()
+        q = None
     else:
         px = py = float(e.pixelgroesse)
         ox = oy = 0.0
-
     if e.epsg:
         srs = osr.SpatialReference()
         srs.ImportFromEPSG(int(e.epsg))
     elif srs is None and dgm_srs_wkt:
         srs = osr.SpatialReference(wkt=dgm_srs_wkt)
-        lg(f"Achse ohne Koordinatensystem (.prj fehlt) – übernommen vom DGM1: {srs.GetName()}")
+        lg(f"Eingangsdaten ohne Koordinatensystem (.prj fehlt) – übernommen vom DGM1: {srs.GetName()}")
     if srs is None:
-        raise ValueError("Linien-Layer hat kein Koordinatensystem – bitte EPSG angeben.")
+        raise ValueError("Kein Koordinatensystem bekannt – bitte EPSG angeben.")
     srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
     srs_wkt = srs.ExportToWkt()
-    km2m, km_steigend = km_abbildung(e, achse, attr, werte, lg)
-    fs(10)
 
-    if methode == "abstand":
-        punkte = punkte_abstand(e, werte, achse, km2m, km_steigend, lg)
-    else:
-        punkte = punkte_setzen(e, werte, achse, linien, km2m, km_steigend, lg)
+    # ---------------- 2. Höhenpunkte ----------------
+    if methode != "punkte":
+        km2m, km_steigend = km_abbildung(e, achse, attr, werte, lg)
+        if methode == "abstand":
+            punkte = punkte_abstand(e, werte, achse, km2m, km_steigend, lg)
+        else:
+            punkte = punkte_setzen(e, werte, achse, linien, km2m, km_steigend, lg)
     punkte = doppelte_bereinigen(punkte, e.duplikate, e.bezugsjahr, lg)
     if len(punkte) < 3:
         raise ValueError("Zu wenige Punkte für eine Triangulation (< 3).")
-    if methode == "abstand":
-        punkte_alle = punkte + profile_interpolieren(punkte, achse, e.verdichtung, e.tangenten_fenster, lg)
-    else:
-        punkte_alle = punkte + (verdichten(punkte, linien, e.verdichtung, lg) if linien else [])
-    pfad_pkt = os.path.join(e.ausgabe_ordner, "Punkte_1945.gpkg")
-    punkte_schreiben(pfad_pkt, punkte_alle, srs)
-    lg(f"-> {pfad_pkt}")
-    fs(25)
+    fs(15)
 
-    # ---- Füllbereich für DGM1 (Flächen ohne Tabellenwerte) ----
+    # ---------------- 3. Ergebnisfläche und Rastergitter ----------------
     fuell = None
-    if dgm_dateien and e.dgm1_auffuellen:
-        if e.maske:
-            fuell = e.maske
-        else:
-            _, d = achse.stationen_versatz([[p.x, p.y] for p in punkte_alle])
-            breite_m = float(np.max(np.abs(d))) + e.auffuell_puffer
-            fuell = achse.geom.Buffer(breite_m)
-            _polygon_schreiben(os.path.join(e.ausgabe_ordner, "Auffuellbereich_DGM1.gpkg"), fuell, srs)
-            lg(f"DGM1-Auffüllung: Achse ± {breite_m:.1f} m -> Auffuellbereich_DGM1.gpkg")
-
-    # ---- Rastergitter festlegen (am DGM1 ausgerichtet) ----
-    xs = np.array([p.x for p in punkte_alle])
-    ys = np.array([p.y for p in punkte_alle])
-    x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
-    if fuell is not None:
-        if isinstance(fuell, str):
-            _ds, _l = _vektor_oeffnen(fuell)
-            fx0, fx1, fy0, fy1 = _l.GetExtent()
-        else:
-            fx0, fx1, fy0, fy1 = fuell.GetEnvelope()
-        x0, x1, y0, y1 = min(x0, fx0), max(x1, fx1), min(y0, fy0), max(y1, fy1)
+    if e.untersuchungsgebiet:
+        fuell = e.untersuchungsgebiet
+        lg("Ergebnisfläche: Untersuchungsgebiet")
+    elif e.maske:
+        fuell = e.maske
+    elif achse is not None and not gl:
+        _, d = achse.stationen_versatz([[p.x, p.y] for p in punkte])
+        breite_m = float(np.max(np.abs(d))) + e.auffuell_puffer
+        fuell = achse.geom.Buffer(breite_m)
+        lg(f"Ergebnisfläche: Achse ± {breite_m:.1f} m")
+    else:
+        fuell = _datenflaeche(punkte, gl, max(e.auffuell_puffer, px))
+        lg(f"Ergebnisfläche: Punkte und Linien + {e.auffuell_puffer:g} m, umschlossene Flächen gefüllt "
+           "(Untersuchungsgebiet angeben, um sie genau festzulegen)")
+    if isinstance(fuell, str):
+        _fds, _fl = _vektor_oeffnen(fuell)
+        x0, x1, y0, y1 = _fl.GetExtent()
+    else:
+        _polygon_schreiben(os.path.join(e.ausgabe_ordner, "Ergebnisflaeche.gpkg"), fuell, srs)
+        x0, x1, y0, y1 = fuell.GetEnvelope()
+    if not e.untersuchungsgebiet:
+        xs = [p.x for p in punkte]
+        ys = [p.y for p in punkte]
+        x0, x1, y0, y1 = min(x0, min(xs)), max(x1, max(xs)), min(y0, min(ys)), max(y1, max(ys))
     xmin = ox + math.floor((x0 - ox) / px) * px
     xmax = ox + math.ceil((x1 - ox) / px) * px
     ymax = oy - math.floor((oy - y1) / py) * py
@@ -1080,9 +1483,67 @@ def ausfuehren(e: Einstellungen, log: Logger = print, fortschritt: Callable[[flo
     breite = int(round((xmax - xmin) / px))
     hoehe = int(round((ymax - ymin) / py))
     gt = (xmin, px, 0.0, ymax, 0.0, -py)
-    lg(f"Rastergitter: {breite} x {hoehe} Pixel à {px:g} m")
+    in_flaeche = _maske_rastern(fuell, breite, hoehe, gt, srs, srs_wkt)
+    lg(f"Rastergitter: {breite} x {hoehe} Pixel à {px:g} m (am DGM1 ausgerichtet)")
 
-    # ---- Triangulation (Delaunay, linear) ----
+    # ---------------- 4. DGM1 laden, Abdeckung prüfen, Sohle ----------------
+    dgm = None
+    erg = {}
+    if dgm_pfad:
+        src = gdal.Open(dgm_pfad)
+        gleiches_krs = not dgm_srs_wkt or osr.SpatialReference(wkt=dgm_srs_wkt).IsSame(srs)
+        dgm_ds = gdal.Warp("", src, format="MEM", outputBounds=(xmin, ymin, xmax, ymax),
+                           xRes=px, yRes=py, srcSRS=dgm_srs_wkt or srs_wkt, dstSRS=srs_wkt,
+                           resampleAlg="near" if gleiches_krs else "bilinear",
+                           dstNodata=NODATA, outputType=gdal.GDT_Float64)
+        src = None
+        dgm = dgm_ds.GetRasterBand(1).ReadAsArray()
+        dgm_ds = None
+        dgm[(dgm == NODATA) | (dgm == 0)] = np.nan
+        luecke = in_flaeche & ~np.isfinite(dgm)
+        anteil = luecke.sum() / max(in_flaeche.sum(), 1)
+        if anteil > 0.001:
+            lg(f"WARNUNG: Das DGM1 deckt {anteil:.1%} der Ergebnisfläche nicht ab "
+               f"({luecke.sum() * px * py:,.0f} m²) – Kacheln vollständig?")
+        else:
+            lg("DGM1 deckt die Ergebnisfläche vollständig ab")
+        if e.sohle:
+            dgm = sohle_einbrennen(e, dgm, gt, srs, srs_wkt, lg)
+            p_s = os.path.join(e.ausgabe_ordner, "DGM1_mit_Sohle.tif")
+            raster_schreiben(p_s, dgm, gt, srs_wkt, "DGM1 mit eingebrannter Sohle [m ue. NHN]")
+            erg["dgm_sohle"] = p_s
+            lg("-> DGM1_mit_Sohle.tif")
+    elif e.sohle:
+        lg("WARNUNG: Sohle angegeben, aber kein DGM1 – wird übersprungen")
+    fs(30)
+
+    def dgm_wert(xy):
+        out = np.full(len(xy), np.nan)
+        if dgm is None:
+            return out
+        c = np.floor((xy[:, 0] - gt[0]) / gt[1]).astype(int)
+        r = np.floor((xy[:, 1] - gt[3]) / gt[5]).astype(int)
+        ok = (c >= 0) & (c < breite) & (r >= 0) & (r < hoehe)
+        out[ok] = dgm[r[ok], c[ok]]
+        return out
+
+    # ---------------- 5. Verdichtung ----------------
+    if gl:
+        zusatz = gelaendelinien_verdichten(e, punkte, gl, dgm_wert, lg)
+    elif methode == "abstand":
+        zusatz = profile_interpolieren(punkte, achse, e.verdichtung, e.tangenten_fenster, lg)
+    elif linien:
+        zusatz = verdichten(punkte, linien, e.verdichtung, lg)
+    else:
+        zusatz = []
+    punkte_alle = _xy_eindeutig(punkte + zusatz)
+    pfad_pkt = os.path.join(e.ausgabe_ordner, "Punkte_1945.gpkg")
+    punkte_schreiben(pfad_pkt, punkte_alle, srs)
+    erg["punkte"] = pfad_pkt
+    lg(f"-> Punkte_1945.gpkg ({len(punkte_alle)} Punkte)")
+    fs(40)
+
+    # ---------------- 6. Triangulation ----------------
     tmp_tin = os.path.join(e.ausgabe_ordner, "_tin_tmp.tif")
     gdal.Grid(tmp_tin, pfad_pkt, format="GTiff", outputType=gdal.GDT_Float32,
               outputBounds=[xmin, ymax, xmax, ymin], width=breite, height=hoehe,
@@ -1093,76 +1554,64 @@ def ausfuehren(e: Einstellungen, log: Logger = print, fortschritt: Callable[[flo
     ds = None
     gdal.GetDriverByName("GTiff").Delete(tmp_tin)
     gok[gok == NODATA] = np.nan
+    fs(60)
 
-    if e.maske:
+    if e.max_kante > 0:
+        lang, n = lange_dreiecke_maske(punkte_alle, e.max_kante, breite, hoehe, gt, srs, srs_wkt)
+        gok[lang] = np.nan
+        lg(f"TIN: {n} Dreiecke mit Kanten > {e.max_kante:g} m verworfen (dort DGM1)")
+    if e.maske and e.maske != fuell:
         gok[~_maske_rastern(e.maske, breite, hoehe, gt, srs, srs_wkt)] = np.nan
         lg("TIN auf vorgegebenes Polygon begrenzt")
-    if e.auto_maske:
+    if e.auto_maske and achse is not None and methode != "punkte" and not gl:
         poly = korridor_polygon(punkte_alle, achse, e.masken_klasse, 0.5 * px)
         gok[~_maske_rastern(poly, breite, hoehe, gt, srs, srs_wkt)] = np.nan
         _polygon_schreiben(os.path.join(e.ausgabe_ordner, "Korridor_Maske.gpkg"), poly, srs)
-        lg("TIN auf Korridor zwischen äußersten Punkten begrenzt -> Korridor_Maske.gpkg")
-    fs(55)
+        lg("TIN auf Korridor der Profile begrenzt -> Korridor_Maske.gpkg")
+    gok[~in_flaeche] = np.nan
+    fs(70)
 
-    # ---- DGM1 laden ----
-    dgm = None
-    if dgm_dateien:
-        src = gdal.Open(vrt_pfad)
-        dgm_ds = gdal.Warp("", src, format="MEM", outputBounds=(xmin, ymin, xmax, ymax),
-                           xRes=px, yRes=py, srcSRS=dgm_srs_wkt or srs_wkt, dstSRS=srs_wkt,
-                           resampleAlg="bilinear", dstNodata=NODATA, outputType=gdal.GDT_Float32)
-        src = None
-        dgm = dgm_ds.GetRasterBand(1).ReadAsArray().astype(np.float64)
-        dgm[dgm == NODATA] = np.nan
-        dgm_ds = None
-    fs(65)
-
-    erg = {"punkte": pfad_pkt}
+    # ---------------- 7. DGM1 auffüllen, Ergebnisse ----------------
+    fl = px * py
     quelle = np.where(np.isfinite(gok), 1, 0).astype(np.uint8)
-    if fuell is not None:
-        im_fuell = _maske_rastern(fuell, breite, hoehe, gt, srs, srs_wkt)
-        nutzen = im_fuell & ~np.isfinite(gok) & np.isfinite(dgm)
+    if dgm is not None and e.dgm1_auffuellen:
+        nutzen = in_flaeche & ~np.isfinite(gok) & np.isfinite(dgm)
         gok[nutzen] = dgm[nutzen]
         quelle[nutzen] = 2
-        fl = px * py
-        lg(f"GOK45: {np.sum(quelle == 1) * fl:,.0f} m² aus Tabellenwerten, "
-           f"{np.sum(quelle == 2) * fl:,.0f} m² aus DGM1 übernommen")
-        p_q = os.path.join(e.ausgabe_ordner, "GOK45_Quelle.tif")
-        raster_schreiben(p_q, quelle, gt, srs_wkt, "1 = TIN aus Tabelle 1945, 2 = DGM1 übernommen", byte=True)
-        erg["quelle"] = p_q
+    lg(f"GOK45: {np.sum(quelle == 1) * fl:,.0f} m² aus Höhendaten 1945 trianguliert, "
+       f"{np.sum(quelle == 2) * fl:,.0f} m² aus DGM1 übernommen")
+    p_q = os.path.join(e.ausgabe_ordner, "GOK45_Quelle.tif")
+    raster_schreiben(p_q, quelle, gt, srs_wkt, "1 = TIN aus Daten 1945, 2 = DGM1 übernommen", byte=True)
+    erg["quelle"] = p_q
 
     p_gok = os.path.join(e.ausgabe_ordner, "GOK45.tif")
     raster_schreiben(p_gok, gok, gt, srs_wkt, "GOK 1945 [m ue. NHN]")
     erg["gok45"] = p_gok
-    lg(f"-> {p_gok}   ({_stat(gok)})")
+    lg(f"-> GOK45.tif   ({_stat(gok)})")
 
     bombe = gok - float(e.eindringtiefe)
     p_bombe = os.path.join(e.ausgabe_ordner, f"GOK45_minus_{e.eindringtiefe:g}m_Eindringtiefe.tif")
     raster_schreiben(p_bombe, bombe, gt, srs_wkt,
                      f"max. Bomben-Eindringtiefe (GOK45 - {e.eindringtiefe:g} m) [m ue. NHN]")
     erg["eindringtiefe"] = p_bombe
-    lg(f"-> {p_bombe}   ({_stat(bombe)})")
-    fs(75)
+    lg(f"-> {os.path.basename(p_bombe)}   ({_stat(bombe)})")
+    fs(80)
 
     if dgm is not None:
         diff = dgm - gok
         p_diff = os.path.join(e.ausgabe_ordner, "Differenz_DGM1_minus_GOK45.tif")
-        raster_schreiben(p_diff, diff, gt, srs_wkt,
-                         "DGM1 - GOK45 [m] (+ Auftrag / - Abtrag seit 1945)")
+        raster_schreiben(p_diff, diff, gt, srs_wkt, "DGM1 - GOK45 [m] (+ Auftrag / - Abtrag seit 1945)")
         erg["differenz"] = p_diff
-        lg(f"-> {p_diff}   ({_stat(diff)})")
+        lg(f"-> Differenz_DGM1_minus_GOK45.tif   ({_stat(diff)})")
         v = diff[np.isfinite(diff)]
         if v.size:
-            fl = px * py
             lg(f"   Auftrag seit 1945: {v[v > 0].sum() * fl:,.0f} m³   "
                f"Abtrag: {abs(v[v < 0].sum()) * fl:,.0f} m³   Fläche: {v.size * fl:,.0f} m²")
-
         sonde = dgm - bombe
         p_sonde = os.path.join(e.ausgabe_ordner, "Sondiertiefe_unter_DGM1.tif")
-        raster_schreiben(p_sonde, sonde, gt, srs_wkt,
-                         "Tiefe der max. Bomben-Eindringtiefe unter heutiger GOK [m]")
+        raster_schreiben(p_sonde, sonde, gt, srs_wkt, "Tiefe der max. Bomben-Eindringtiefe unter heutiger GOK [m]")
         erg["sondiertiefe"] = p_sonde
-        lg(f"-> {p_sonde}   ({_stat(sonde)})")
+        lg(f"-> Sondiertiefe_unter_DGM1.tif   ({_stat(sonde)})")
     else:
         lg("Kein DGM1 angegeben – Differenzraster wird nicht berechnet.")
 
@@ -1197,7 +1646,8 @@ def einstellungen_aus_ini(pfad: str) -> Einstellungen:
         if k not in felder:
             raise ValueError(f"Unbekannte Einstellung '{k}' in {pfad}")
         typ = felder[k].type
-        if k in ("excel", "linien", "ausgabe_ordner", "achse_datei", "km_punkte", "maske"):
+        if k in ("excel", "linien", "ausgabe_ordner", "achse_datei", "km_punkte", "maske", "punkte",
+                 "gelaendelinien", "untersuchungsgebiet", "sohle", "gewaesser"):
             kw[k] = pfad_abs(v)
         elif k == "dgm1":
             kw[k] = [pfad_abs(x.strip()) for x in re.split(r"[;\n]", v) if x.strip()]
@@ -1212,12 +1662,148 @@ def einstellungen_aus_ini(pfad: str) -> Einstellungen:
     return Einstellungen(**kw)
 
 
+def einstellungen_als_ini(e: Einstellungen, pfad: str):
+    """Einstellungen speichern – die Datei kann später direkt wiederverwendet werden."""
+    standard = Einstellungen()
+    zeilen = ["# DGM 1945 – gespeicherte Einstellungen", "# Aufruf: python dgm1945_kern.py diese_datei.ini", "",
+              "[einstellungen]"]
+    for name in Einstellungen.__dataclass_fields__:
+        wert = getattr(e, name)
+        if wert == getattr(standard, name) and name != "ausgabe_ordner":
+            continue
+        if isinstance(wert, list):
+            wert = "; ".join(wert)
+        elif isinstance(wert, bool):
+            wert = "ja" if wert else "nein"
+        elif wert is None:
+            wert = "auto"
+        zeilen.append(f"{name} = {wert}")
+    with open(pfad, "w", encoding="utf-8") as f:
+        f.write("\n".join(zeilen) + "\n")
+
+
+# --------------------------------------------------------------------------
+# Assistent: fragt zuerst alle Daten ab
+# --------------------------------------------------------------------------
+_VEKTOR = [("Shape / GeoPackage", "*.shp *.gpkg"), ("Alle Dateien", "*.*")]
+_RASTER = [("Raster", "*.tif *.tiff *.vrt *.asc *.xyz *.img"), ("Alle Dateien", "*.*")]
+_TABELLE = [("Tabellen", "*.xlsx *.xlsm *.xls *.csv *.txt"), ("Alle Dateien", "*.*")]
+
+
+class _Fragen:
+    """Dateiauswahl per Dialog (tkinter) oder – ohne Oberfläche – per Eingabe in der Konsole."""
+
+    def __init__(self):
+        try:
+            import tkinter
+            from tkinter import filedialog, messagebox, simpledialog
+            self.root = tkinter.Tk()
+            self.root.withdraw()
+            self.fd, self.mb, self.sd = filedialog, messagebox, simpledialog
+        except Exception:
+            self.root = None
+
+    def datei(self, titel, typen, pflicht=False, mehrere=False):
+        while True:
+            if self.root:
+                print(titel)
+                if mehrere:
+                    wahl = list(self.fd.askopenfilenames(title=titel, filetypes=typen))
+                else:
+                    wahl = self.fd.askopenfilename(title=titel, filetypes=typen) or ""
+            else:
+                ein = input(f"{titel}{' (mehrere mit ; trennen)' if mehrere else ''}"
+                            f"{'' if pflicht else ' [Enter = keine]'}: ").strip().strip('"')
+                wahl = [x.strip().strip('"') for x in ein.split(";") if x.strip()] if mehrere else ein
+            if wahl or not pflicht:
+                return wahl
+            print("  -> Diese Angabe wird benötigt.")
+
+    def ordner(self, titel):
+        while True:
+            if self.root:
+                print(titel)
+                wahl = self.fd.askdirectory(title=titel)
+            else:
+                wahl = input(f"{titel}: ").strip().strip('"')
+            if wahl:
+                return wahl
+
+    def ja(self, frage):
+        if self.root:
+            return self.mb.askyesno("DGM 1945", frage)
+        return input(f"{frage} [j/n]: ").strip().lower().startswith("j")
+
+    def zahl(self, frage, standard):
+        if self.root:
+            w = self.sd.askfloat("DGM 1945", frage, initialvalue=standard)
+            return standard if w is None else w
+        ein = input(f"{frage} [{standard:g}]: ").strip().replace(",", ".")
+        return float(ein) if ein else standard
+
+    def info(self, text):
+        print(text)
+        if self.root:
+            self.mb.showinfo("DGM 1945", text)
+
+
+def assistent():
+    """Fragt nacheinander alle Eingangsdaten ab, zeigt eine Übersicht und startet die Berechnung."""
+    f = _Fragen()
+    print("=== DGM 1945 – Dateneingabe ===")
+    e = Einstellungen()
+    if f.ja("Liegen die Höhenpunkte 1945 bereits als Punkt-Shape (verortet, mit Höhe) vor?\n\n"
+            "Nein = Tabelle (Kilometrierung/Seite/Abstand/Höhe) + Achse"):
+        e.punkte = f.datei("1/6  Höhenpunkte 1945 (Punkt-Shape)", _VEKTOR, pflicht=True)
+    else:
+        e.excel = f.datei("1/6  Höhentabelle 1945 (Excel/CSV)", _TABELLE, pflicht=True)
+        e.linien = f.datei("1/6  Flussachse mit Kilometrierung (Linien-Shape)", _VEKTOR, pflicht=True)
+    e.gelaendelinien = f.datei("2/6  Geländelinien (Linien-Shape) – Abbrechen = keine", _VEKTOR)
+    e.dgm1 = f.datei("3/6  Aktuelles DGM1: fertiges Mosaik ODER alle Einzelkacheln markieren", _RASTER,
+                     pflicht=True, mehrere=True)
+    e.untersuchungsgebiet = f.datei("4/6  Untersuchungsgebiet (Polygon) – Abbrechen = automatisch", _VEKTOR)
+    if f.ja("Soll die Gewässersohle in das aktuelle DGM1 eingebrannt werden?\n"
+            "(das DGM1 zeigt sonst nur die Wasseroberfläche)"):
+        e.sohle = f.datei("5/6  Sohle: Linien (mit Z-Werten oder Höhenfeld) oder Punkte", _VEKTOR, pflicht=True)
+        e.sohle_puffer = f.zahl("Halbe Sohlbreite in m (Puffer um die Sohllinie)", 2.5)
+        e.gewaesser = f.datei("5/6  Wasserfläche (Polygon) für die Böschung – Abbrechen = keine", _VEKTOR)
+    e.ausgabe_ordner = f.ordner("6/6  Ausgabeordner wählen")
+
+    uebersicht = "\n".join([
+        "Folgende Daten werden verwendet:",
+        f"  Höhenpunkte:   {e.punkte or e.excel}",
+        *([f"  Achse:         {e.linien}"] if e.linien else []),
+        f"  Geländelinien: {e.gelaendelinien or '-'}",
+        f"  DGM1:          {len(e.dgm1)} Datei(en){' -> Mosaik wird gebaut' if len(e.dgm1) > 1 else ''}",
+        f"  Untersuchungsgebiet: {e.untersuchungsgebiet or 'automatisch'}",
+        f"  Sohle:         {e.sohle or '-'}",
+        f"  Ausgabe:       {e.ausgabe_ordner}",
+    ])
+    if f.root:
+        print(uebersicht)
+    if not f.ja(uebersicht + "\n\nBerechnung starten?"):
+        print("Abgebrochen.")
+        return 1
+    os.makedirs(e.ausgabe_ordner, exist_ok=True)
+    ini = os.path.join(e.ausgabe_ordner, "Einstellungen.ini")
+    einstellungen_als_ini(e, ini)
+    try:
+        ausfuehren(e)
+    except Exception as ex:
+        f.info(f"FEHLER: {ex}")
+        return 1
+    f.info(f"Fertig. Ergebnisse in:\n{e.ausgabe_ordner}\n\nEinstellungen gespeichert in Einstellungen.ini "
+           "(für eine erneute Berechnung: Datei auf DGM1945_starten.bat ziehen).")
+    return 0
+
+
 def main(argv=None):
     argv = argv if argv is not None else sys.argv[1:]
     if not argv:
+        return assistent()
+    if argv[0] in ("-h", "--help", "/?"):
         print(__doc__)
-        print("Aufruf: python dgm1945_kern.py konfiguration.ini [weitere.ini ...]")
-        return 1
+        return 0
     for ini in argv:
         e = einstellungen_aus_ini(ini)
         ausfuehren(e)

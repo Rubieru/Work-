@@ -126,7 +126,7 @@ def main(ordner):
 
     with open(os.path.join(ordner, "test.ini"), "w", encoding="utf-8") as f:
         f.write("[eingabe]\nexcel = hoehen_1945.xlsx\nlinien = linien.shp\n"
-                "dgm1 = dgm1\n[kilometrierung]\nkm_start = 10.0\nkm_steigend = ja\n"
+                "dgm1 = dgm1\n[kilometrierung]\nkm_start = 10.0\nkm_steigend = ja\nfliessrichtung_km_steigend = ja\n"
                 "[ausgabe]\nausgabe_ordner = ergebnis\n")
 
 

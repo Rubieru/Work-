@@ -9,14 +9,15 @@ neu starten oder in der Toolbox „Skripte neu laden“. Das Werkzeug erscheint 
 Skripte > DGM 1945.
 """
 
+import importlib
 import os
 import sys
 
 from qgis.core import (QgsProcessing, QgsProcessingAlgorithm, QgsProcessingContext,
                        QgsProcessingException, QgsProcessingParameterBoolean,
-                       QgsProcessingParameterEnum, QgsProcessingParameterFeatureSource,
-                       QgsProcessingParameterField, QgsProcessingParameterFile,
-                       QgsProcessingParameterFolderDestination,
+                       QgsProcessingParameterDefinition, QgsProcessingParameterEnum,
+                       QgsProcessingParameterFeatureSource, QgsProcessingParameterField,
+                       QgsProcessingParameterFile, QgsProcessingParameterFolderDestination,
                        QgsProcessingParameterMultipleLayers, QgsProcessingParameterNumber,
                        QgsProcessingParameterString)
 
@@ -40,37 +41,37 @@ def _kern():
         raise QgsProcessingException(
             "dgm1945_kern.py nicht gefunden. Bitte in den Processing-Skriptordner kopieren: "
             + ", ".join(ordner))
-    return dgm1945_kern
+    return importlib.reload(dgm1945_kern)   # nach einem Update ohne QGIS-Neustart wirksam
 
 
 class Dgm1945Algorithmus(QgsProcessingAlgorithm):
-    EXCEL = "EXCEL"
-    BLATT = "BLATT"
-    LINIEN = "LINIEN"
-    TYP_FELD = "TYP_FELD"
-    ACHSE_WERT = "ACHSE_WERT"
-    KM_START = "KM_START"
-    ACHSE_KM_FELD = "ACHSE_KM_FELD"
-    BERGSENKUNG = "BERGSENKUNG"
-    BERGSENKUNG_FAKTOR = "BERGSENKUNG_FAKTOR"
-    BEZUGSJAHR = "BEZUGSJAHR"
-    DUPLIKATE = "DUPLIKATE"
-    AUFFUELLEN = "AUFFUELLEN"
-    AUFFUELL_PUFFER = "AUFFUELL_PUFFER"
-    KM_STEIGEND = "KM_STEIGEND"
-    KM_PUNKTE = "KM_PUNKTE"
-    KM_PUNKTE_FELD = "KM_PUNKTE_FELD"
-    FLIESS_KM_STEIGEND = "FLIESS_KM_STEIGEND"
-    METHODE = "METHODE"
-    SUCHWEITE = "SUCHWEITE"
-    VERDICHTUNG = "VERDICHTUNG"
+    # --- Daten (werden zuerst abgefragt) ---
+    PUNKTE = "PUNKTE"
+    PUNKTE_HOEHE_FELD = "PUNKTE_HOEHE_FELD"
+    GELAENDELINIEN = "GELAENDELINIEN"
+    LINIEN_HOEHE_FELD = "LINIEN_HOEHE_FELD"
     DGM1 = "DGM1"
     DGM1_ORDNER = "DGM1_ORDNER"
-    PIXEL = "PIXEL"
-    MASKE = "MASKE"
-    AUTO_MASKE = "AUTO_MASKE"
-    TIEFE = "TIEFE"
+    UNTERSUCHUNGSGEBIET = "UNTERSUCHUNGSGEBIET"
+    SOHLE = "SOHLE"
+    SOHLE_HOEHE_FELD = "SOHLE_HOEHE_FELD"
+    SOHLE_PUFFER = "SOHLE_PUFFER"
+    GEWAESSER = "GEWAESSER"
+    EXCEL = "EXCEL"
+    ACHSE = "ACHSE"
     AUSGABE = "AUSGABE"
+    # --- Erweitert ---
+    MAX_KANTE = "MAX_KANTE"
+    LINIEN_ABSTAND = "LINIEN_ABSTAND"
+    FANG_TOLERANZ = "FANG_TOLERANZ"
+    AUFFUELL_PUFFER = "AUFFUELL_PUFFER"
+    TIEFE = "TIEFE"
+    BEZUGSJAHR = "BEZUGSJAHR"
+    KM_START = "KM_START"
+    KM_STEIGEND = "KM_STEIGEND"
+    LINKS_BEZUG = "LINKS_BEZUG"
+    BERGSENKUNG = "BERGSENKUNG"
+    MOSAIK_SPEICHERN = "MOSAIK_SPEICHERN"
 
     def name(self):
         return "dgm1945_gok45"
@@ -89,88 +90,90 @@ class Dgm1945Algorithmus(QgsProcessingAlgorithm):
 
     def shortHelpString(self):
         return (
-            "Rekonstruiert die Geländeoberkante 1945 aus einer Höhentabelle (Excel/CSV) und der "
-            "kilometrierten Achse.<br><br>"
-            "<b>Tabelle</b>: KILOMETRIE (m oder km), SEITE (links/rechts), ABSTAND zur Achse [m], "
-            "HOEHE [m NHN]; optional JAHR (bei mehreren Werten am selben Ort gewinnt das Jahr am "
-            "nächsten an 1945) und eine Bergsenkungsspalte. Die Kopfzeile wird automatisch erkannt.<br>"
-            "<b>Achse</b>: Start-km/-m steht in der DBF (Feld KM, START_M … wird automatisch "
-            "gesucht), die Richtung wird aus den Tabellen-Stationen bestimmt.<br>"
-            "Alternativ: Tabelle mit Namen Sohle/Berme/Deich und passende Linien im Layer.<br><br>"
-            "Ablauf: Punkte setzen, Delaunay-Triangulation, Flächen ohne Tabellenwerte mit DGM1 "
-            "füllen -> GOK45.tif, GOK45 - 8 m -> Eindringtiefe, DGM1 - GOK45 -> Differenz, "
-            "DGM1 - (GOK45 - 8 m) -> Sondiertiefe.")
+            "Rekonstruiert die Geländeoberkante 1945 (GOK45) und berechnet Differenz zum DGM1, "
+            "Bomben-Eindringtiefe (GOK45 − 8 m) und Sondiertiefe.<br><br>"
+            "<b>Daten</b><br>"
+            "• <b>Höhenpunkte 1945</b>: verortete Punkte mit Höhe (Feld HOEHE_FG o.ä. wird automatisch "
+            "erkannt).<br>"
+            "• <b>Geländelinien</b>: entlang jeder Linie wird zwischen den Höhenpunkten interpoliert; Linien mit "
+            "Höheninfo „DGM“ oder „Sohle“ (Feld Hoe_Inf) erhalten die Höhen aus dem DGM1.<br>"
+            "• <b>DGM1</b>: ein fertiges Mosaik ODER alle Einzelkacheln (bzw. ein Ordner) – das Mosaik wird "
+            "automatisch gebaut. Es muss die ganze Fläche abdecken (sonst Warnung im Protokoll).<br>"
+            "• <b>Untersuchungsgebiet</b> (empfohlen): legt die Ergebnisfläche fest; dort, wo keine Daten 1945 "
+            "vorliegen, wird das DGM1 übernommen.<br>"
+            "• <b>Sohle</b> (optional): Sohllinien mit Z-Werten oder Höhenfeld werden mit Puffer in das DGM1 "
+            "eingebrannt (DGM1 zeigt sonst die Wasseroberfläche); optional Wasserfläche für die Böschung.<br>"
+            "• Alternativ zu den Höhenpunkten: Tabelle (Kilometrierung/Seite/Abstand/Höhe) + Achse.<br><br>"
+            "Dreiecke mit Kanten über „max. Kantenlänge“ werden verworfen – dort gilt das DGM1.")
+
+    def _neu(self, p, erweitert=False):
+        if erweitert:
+            p.setFlags(p.flags() | QgsProcessingParameterDefinition.FlagAdvanced)
+        self.addParameter(p)
 
     def initAlgorithm(self, config=None):
-        self.addParameter(QgsProcessingParameterFile(
-            self.EXCEL, "Höhentabelle 1945 (Excel/CSV)", extension="",
-            fileFilter="Tabellen (*.xlsx *.xlsm *.xls *.ods *.csv *.txt)"))
-        self.addParameter(QgsProcessingParameterString(
-            self.BLATT, "Tabellenblatt (leer = erstes)", optional=True))
-        self.addParameter(QgsProcessingParameterFeatureSource(
-            self.LINIEN, "Flussachse (ggf. mit Sohle-/Berme-/Deich-Linien)", [QgsProcessing.TypeVectorLine]))
-        self.addParameter(QgsProcessingParameterField(
-            self.TYP_FELD, "Feld mit Linientyp (nur bei mehreren Linien)", "typ", self.LINIEN, optional=True))
-        self.addParameter(QgsProcessingParameterString(
-            self.ACHSE_WERT, "Wert der Flussachse im Typ-Feld", "Achse"))
-        self.addParameter(QgsProcessingParameterField(
-            self.ACHSE_KM_FELD, "DBF-Feld mit Start-km/-m der Achse (leer = automatisch suchen)",
-            None, self.LINIEN, optional=True))
-        self.addParameter(QgsProcessingParameterNumber(
-            self.KM_START, "… oder km am Anfangspunkt der Achse von Hand",
-            QgsProcessingParameterNumber.Double, optional=True))
-        self.addParameter(QgsProcessingParameterEnum(
-            self.KM_STEIGEND, "km in Digitalisierrichtung der Achse",
-            ["automatisch bestimmen", "steigend", "fallend"], defaultValue=0))
-        self.addParameter(QgsProcessingParameterFeatureSource(
-            self.KM_PUNKTE, "Optional: km-Punkte zur Kalibrierung der Kilometrierung",
-            [QgsProcessing.TypeVectorPoint], optional=True))
-        self.addParameter(QgsProcessingParameterField(
-            self.KM_PUNKTE_FELD, "Feld mit km in km-Punkten", "km", self.KM_PUNKTE, optional=True))
-        self.addParameter(QgsProcessingParameterBoolean(
-            self.FLIESS_KM_STEIGEND, "links/rechts gelten in Richtung steigender km", True))
-        self.addParameter(QgsProcessingParameterEnum(
-            self.METHODE, "Punktsetzung",
-            ["automatisch (Station + Abstand, wenn Spalte ABSTAND vorhanden)",
-             "Station + Seite + Abstand senkrecht zur Achse",
-             "Lot von der Achse auf Sohle-/Berme-/Deich-Linien",
-             "Gleiche Stationierung entlang jeder Linie"], defaultValue=0))
-        self.addParameter(QgsProcessingParameterString(
-            self.BERGSENKUNG, "Optional: Spalte mit Bergsenkung (wird von der Höhe abgezogen, z.B. BERGSENK)",
+        n = self._neu
+        D, I = QgsProcessingParameterNumber.Double, QgsProcessingParameterNumber.Integer
+        n(QgsProcessingParameterFeatureSource(
+            self.PUNKTE, "1. Höhenpunkte 1945 (Punkt-Layer)", [QgsProcessing.TypeVectorPoint], optional=True))
+        n(QgsProcessingParameterField(
+            self.PUNKTE_HOEHE_FELD, "   Höhenfeld der Punkte (leer = automatisch, z.B. HOEHE_FG)", None,
+            self.PUNKTE, QgsProcessingParameterField.Numeric, optional=True))
+        n(QgsProcessingParameterFeatureSource(
+            self.GELAENDELINIEN, "2. Geländelinien", [QgsProcessing.TypeVectorLine], optional=True))
+        n(QgsProcessingParameterField(
+            self.LINIEN_HOEHE_FELD, "   Feld mit Höheninfo (DGM/Sohle) (leer = automatisch Hoe_Inf)", None,
+            self.GELAENDELINIEN, optional=True))
+        n(QgsProcessingParameterMultipleLayers(
+            self.DGM1, "3. Aktuelles DGM1 – fertiges Mosaik oder alle Einzelkacheln", QgsProcessing.TypeRaster,
             optional=True))
-        self.addParameter(QgsProcessingParameterNumber(
-            self.BERGSENKUNG_FAKTOR, "Umrechnung Bergsenkung in m (cm -> 0.01)",
-            QgsProcessingParameterNumber.Double, 0.01))
-        self.addParameter(QgsProcessingParameterNumber(
-            self.BEZUGSJAHR, "Mehrere Werte am selben Ort: Jahr am nächsten an",
-            QgsProcessingParameterNumber.Integer, 1945))
-        self.addParameter(QgsProcessingParameterEnum(
-            self.DUPLIKATE, "Mehrere Werte am selben Ort",
-            ["Jahr am nächsten am Bezugsjahr", "Mittelwert", "alle verwenden"], defaultValue=0))
-        self.addParameter(QgsProcessingParameterNumber(
-            self.SUCHWEITE, "Max. Abstand Achse – Linie [m]", QgsProcessingParameterNumber.Double, 1000.0))
-        self.addParameter(QgsProcessingParameterNumber(
-            self.VERDICHTUNG, "Verdichtung entlang der Linien [m] (0 = aus)",
-            QgsProcessingParameterNumber.Double, 5.0, minValue=0))
-        self.addParameter(QgsProcessingParameterMultipleLayers(
-            self.DGM1, "DGM1 (aktuell, ein oder mehrere Kacheln)", QgsProcessing.TypeRaster, optional=True))
-        self.addParameter(QgsProcessingParameterFile(
-            self.DGM1_ORDNER, "… oder Ordner mit DGM1-Kacheln", QgsProcessingParameterFile.Folder,
+        n(QgsProcessingParameterFile(
+            self.DGM1_ORDNER, "   … oder Ordner mit DGM1-Kacheln", QgsProcessingParameterFile.Folder, optional=True))
+        n(QgsProcessingParameterFeatureSource(
+            self.UNTERSUCHUNGSGEBIET, "4. Untersuchungsgebiet (Polygon, empfohlen)",
+            [QgsProcessing.TypeVectorPolygon], optional=True))
+        n(QgsProcessingParameterFeatureSource(
+            self.SOHLE, "5. Sohle für das DGM1 (Linien mit Z/Höhenfeld oder Punkte, optional)",
+            [QgsProcessing.TypeVectorLine, QgsProcessing.TypeVectorPoint], optional=True))
+        n(QgsProcessingParameterField(
+            self.SOHLE_HOEHE_FELD, "   Höhenfeld der Sohle (leer = Z-Werte / automatisch)", None, self.SOHLE,
+            QgsProcessingParameterField.Numeric, optional=True))
+        n(QgsProcessingParameterNumber(self.SOHLE_PUFFER, "   Halbe Sohlbreite [m]", D, 2.5, minValue=0))
+        n(QgsProcessingParameterFeatureSource(
+            self.GEWAESSER, "   Wasserfläche für die Böschung (Polygon, optional)",
+            [QgsProcessing.TypeVectorPolygon], optional=True))
+        n(QgsProcessingParameterFile(
+            self.EXCEL, "Alternativ zu 1.: Höhentabelle (Kilometrierung/Seite/Abstand/Höhe)",
+            extension="", fileFilter="Tabellen (*.xlsx *.xlsm *.xls *.ods *.csv *.txt)", optional=True))
+        n(QgsProcessingParameterFeatureSource(
+            self.ACHSE, "   … mit Flussachse (Kilometrierung in der DBF)", [QgsProcessing.TypeVectorLine],
             optional=True))
-        self.addParameter(QgsProcessingParameterNumber(
-            self.PIXEL, "Pixelgröße [m] (nur ohne DGM1)", QgsProcessingParameterNumber.Double, 1.0, minValue=0.01))
-        self.addParameter(QgsProcessingParameterFeatureSource(
-            self.MASKE, "Optional: Begrenzungspolygon", [QgsProcessing.TypeVectorPolygon], optional=True))
-        self.addParameter(QgsProcessingParameterBoolean(
-            self.AUTO_MASKE, "TIN automatisch auf den Bereich der Profile begrenzen", True))
-        self.addParameter(QgsProcessingParameterBoolean(
-            self.AUFFUELLEN, "Flächen ohne Tabellenwerte mit DGM1 füllen", True))
-        self.addParameter(QgsProcessingParameterNumber(
-            self.AUFFUELL_PUFFER, "Füllbereich: Achse ± (max. Abstand + x m)",
-            QgsProcessingParameterNumber.Double, 20.0, minValue=0))
-        self.addParameter(QgsProcessingParameterNumber(
-            self.TIEFE, "Bomben-Eindringtiefe [m]", QgsProcessingParameterNumber.Double, 8.0))
-        self.addParameter(QgsProcessingParameterFolderDestination(self.AUSGABE, "Ausgabeordner"))
+        n(QgsProcessingParameterFolderDestination(self.AUSGABE, "Ausgabeordner"))
+
+        # erweiterte Einstellungen
+        n(QgsProcessingParameterNumber(self.MAX_KANTE, "Max. Kantenlänge der Dreiecke [m] (0 = aus)", D, 50.0,
+                                       minValue=0), True)
+        n(QgsProcessingParameterNumber(self.LINIEN_ABSTAND, "Punktabstand entlang der Geländelinien [m]", D, 1.0,
+                                       minValue=0.1), True)
+        n(QgsProcessingParameterNumber(self.FANG_TOLERANZ, "Punkt liegt auf Linie bis [m]", D, 0.1,
+                                       minValue=0), True)
+        n(QgsProcessingParameterNumber(self.AUFFUELL_PUFFER,
+                                       "Ohne Untersuchungsgebiet: Puffer um Punkte/Linien [m]", D, 20.0,
+                                       minValue=0), True)
+        n(QgsProcessingParameterNumber(self.TIEFE, "Bomben-Eindringtiefe [m]", D, 8.0), True)
+        n(QgsProcessingParameterNumber(self.BEZUGSJAHR, "Mehrere Werte am selben Ort: Jahr am nächsten an", I,
+                                       1945), True)
+        n(QgsProcessingParameterNumber(self.KM_START, "Tabelle: km am Anfang der Achse (leer = aus DBF)", D,
+                                       optional=True), True)
+        n(QgsProcessingParameterEnum(self.KM_STEIGEND, "Tabelle: km in Digitalisierrichtung",
+                                     ["automatisch", "steigend", "fallend"], defaultValue=0), True)
+        n(QgsProcessingParameterEnum(self.LINKS_BEZUG, "Tabelle: links/rechts gelten in Blickrichtung",
+                                     ["fallender km (Fließrichtung, Emscher)", "steigender km"], defaultValue=0),
+          True)
+        n(QgsProcessingParameterString(self.BERGSENKUNG, "Tabelle: Spalte Bergsenkung [cm] abziehen (z.B. BERGSENK)",
+                                       optional=True), True)
+        n(QgsProcessingParameterBoolean(self.MOSAIK_SPEICHERN, "Aus Kacheln gebautes Mosaik als GeoTIFF speichern",
+                                        True), True)
 
     def _pfad(self, parameters, name, context, feedback):
         if parameters.get(name) in (None, ""):
@@ -178,54 +181,65 @@ class Dgm1945Algorithmus(QgsProcessingAlgorithm):
         return self.parameterAsCompatibleSourceLayerPath(
             parameters, name, context, ["gpkg", "shp"], "gpkg", feedback)
 
+    def _feld(self, parameters, name, context):
+        return (self.parameterAsFields(parameters, name, context) or [""])[0]
+
     def processAlgorithm(self, parameters, context, feedback):
         kern = _kern()
-
-        km_start = None
-        if parameters.get(self.KM_START) not in (None, ""):
-            km_start = self.parameterAsDouble(parameters, self.KM_START, context)
+        punkte = self._pfad(parameters, self.PUNKTE, context, feedback)
+        excel = self.parameterAsFile(parameters, self.EXCEL, context)
+        achse = self._pfad(parameters, self.ACHSE, context, feedback)
+        if not punkte and not excel:
+            raise QgsProcessingException("Bitte Höhenpunkte 1945 (1.) oder eine Höhentabelle mit Achse angeben.")
+        if excel and not punkte and not achse:
+            raise QgsProcessingException("Zur Höhentabelle wird die Flussachse benötigt.")
         dgm1 = [l.source().split("|")[0] for l in self.parameterAsLayerList(parameters, self.DGM1, context)]
         ordner = self.parameterAsFile(parameters, self.DGM1_ORDNER, context)
         if ordner:
             dgm1.append(ordner)
+        if not dgm1:
+            feedback.pushWarning("Kein DGM1 angegeben – Differenz- und Sondiertiefenraster entfallen.")
+        km_start = None
+        if parameters.get(self.KM_START) not in (None, ""):
+            km_start = self.parameterAsDouble(parameters, self.KM_START, context)
 
         e = kern.Einstellungen(
-            excel=self.parameterAsFile(parameters, self.EXCEL, context),
-            excel_blatt=self.parameterAsString(parameters, self.BLATT, context) or "",
-            linien=self._pfad(parameters, self.LINIEN, context, feedback),
-            linien_typ_feld=(self.parameterAsFields(parameters, self.TYP_FELD, context) or ["typ"])[0],
-            achse_wert=self.parameterAsString(parameters, self.ACHSE_WERT, context),
-            achse_km_feld=(self.parameterAsFields(parameters, self.ACHSE_KM_FELD, context) or [""])[0],
+            ausgabe_ordner=self.parameterAsString(parameters, self.AUSGABE, context),
+            punkte=punkte,
+            punkte_hoehe_feld=self._feld(parameters, self.PUNKTE_HOEHE_FELD, context),
+            gelaendelinien=self._pfad(parameters, self.GELAENDELINIEN, context, feedback),
+            linien_hoehe_feld=self._feld(parameters, self.LINIEN_HOEHE_FELD, context),
+            dgm1=dgm1,
+            dgm1_mosaik_speichern=self.parameterAsBool(parameters, self.MOSAIK_SPEICHERN, context),
+            untersuchungsgebiet=self._pfad(parameters, self.UNTERSUCHUNGSGEBIET, context, feedback),
+            sohle=self._pfad(parameters, self.SOHLE, context, feedback),
+            sohle_hoehe_feld=self._feld(parameters, self.SOHLE_HOEHE_FELD, context),
+            sohle_puffer=self.parameterAsDouble(parameters, self.SOHLE_PUFFER, context),
+            gewaesser=self._pfad(parameters, self.GEWAESSER, context, feedback),
+            excel="" if punkte else excel,
+            linien="" if punkte else achse,
+            max_kante=self.parameterAsDouble(parameters, self.MAX_KANTE, context),
+            linien_abstand=self.parameterAsDouble(parameters, self.LINIEN_ABSTAND, context),
+            fang_toleranz=self.parameterAsDouble(parameters, self.FANG_TOLERANZ, context),
+            auffuell_puffer=self.parameterAsDouble(parameters, self.AUFFUELL_PUFFER, context),
+            eindringtiefe=self.parameterAsDouble(parameters, self.TIEFE, context),
+            bezugsjahr=self.parameterAsInt(parameters, self.BEZUGSJAHR, context),
             km_start=km_start,
             km_steigend=[None, True, False][self.parameterAsEnum(parameters, self.KM_STEIGEND, context)],
-            km_punkte=self._pfad(parameters, self.KM_PUNKTE, context, feedback),
-            km_punkte_feld=(self.parameterAsFields(parameters, self.KM_PUNKTE_FELD, context) or ["km"])[0],
-            fliessrichtung_km_steigend=self.parameterAsBool(parameters, self.FLIESS_KM_STEIGEND, context),
-            methode=["auto", "abstand", "lot", "entlang"][self.parameterAsEnum(parameters, self.METHODE, context)],
+            fliessrichtung_km_steigend=self.parameterAsEnum(parameters, self.LINKS_BEZUG, context) == 1,
             bergsenkung_spalte=self.parameterAsString(parameters, self.BERGSENKUNG, context) or "",
-            bergsenkung_faktor=self.parameterAsDouble(parameters, self.BERGSENKUNG_FAKTOR, context),
-            bezugsjahr=self.parameterAsInt(parameters, self.BEZUGSJAHR, context),
-            duplikate=["jahr", "mittel", "alle"][self.parameterAsEnum(parameters, self.DUPLIKATE, context)],
-            dgm1_auffuellen=self.parameterAsBool(parameters, self.AUFFUELLEN, context),
-            auffuell_puffer=self.parameterAsDouble(parameters, self.AUFFUELL_PUFFER, context),
-            suchweite=self.parameterAsDouble(parameters, self.SUCHWEITE, context),
-            verdichtung=self.parameterAsDouble(parameters, self.VERDICHTUNG, context),
-            dgm1=dgm1,
-            pixelgroesse=self.parameterAsDouble(parameters, self.PIXEL, context),
-            maske=self._pfad(parameters, self.MASKE, context, feedback),
-            auto_maske=self.parameterAsBool(parameters, self.AUTO_MASKE, context),
-            eindringtiefe=self.parameterAsDouble(parameters, self.TIEFE, context),
-            ausgabe_ordner=self.parameterAsString(parameters, self.AUSGABE, context),
         )
-
         try:
+            os.makedirs(e.ausgabe_ordner, exist_ok=True)
+            kern.einstellungen_als_ini(e, os.path.join(e.ausgabe_ordner, "Einstellungen.ini"))
             erg = kern.ausfuehren(e, log=feedback.pushInfo, fortschritt=feedback.setProgress)
         except Exception as ex:  # verständliche Meldung statt Traceback
             raise QgsProcessingException(str(ex))
 
         namen = {"gok45": "GOK45", "eindringtiefe": "GOK45 - %g m (Eindringtiefe)" % e.eindringtiefe,
                  "differenz": "Differenz DGM1 - GOK45", "sondiertiefe": "Sondiertiefe unter DGM1",
-                 "punkte": "Punkte 1945", "quelle": "GOK45 Quelle (1 = Tabelle, 2 = DGM1)"}
+                 "punkte": "Punkte 1945", "quelle": "GOK45 Quelle (1 = Daten 1945, 2 = DGM1)",
+                 "dgm_sohle": "DGM1 mit Sohle"}
         for key, pfad in erg.items():
             context.addLayerToLoadOnCompletion(
                 pfad, QgsProcessingContext.LayerDetails(namen.get(key, key), context.project(), key))

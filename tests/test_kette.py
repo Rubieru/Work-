@@ -122,6 +122,80 @@ def main():
         diff = lies(r["differenz"], r["quelle"])
         assert abs(np.median(diff) - 1.0) < 0.02 and np.all(np.abs(np.percentile(diff, [1, 99]) - 1) < 0.05), np.percentile(diff, [1, 50, 99])
         print("Station/Seite/Abstand + DBF-Start + Jahr-Auswahl ok")
+
+        # 7) Höhenpunkte als Punkt-Layer + Geländelinien + DGM1 als Kachel-Ordner
+        srs = lds.GetLayer().GetSpatialRef()
+        ach = td.achse_xy()
+        s_ach = np.r_[0, np.cumsum(np.hypot(*np.diff(ach, axis=0).T))]
+        gds = drv.CreateDataSource(os.path.join(d, "gelaende.shp"))
+        gl = gds.CreateLayer("gelaende", srs, ogr.wkbLineString)
+        gl.CreateField(ogr.FieldDefn("Art", ogr.OFTString))
+        gl.CreateField(ogr.FieldDefn("Hoe_Inf", ogr.OFTString))
+        pds = drv.CreateDataSource(os.path.join(d, "hp.shp"))
+        pl = pds.CreateLayer("hp", srs, ogr.wkbPoint)
+        pl.CreateField(ogr.FieldDefn("HOEHE", ogr.OFTReal))       # Rohwert (soll NICHT genommen werden)
+        pl.CreateField(ogr.FieldDefn("HOEHE_FG", ogr.OFTReal))    # bergsenkungskorrigiert
+        for typ, ab in td.ABST.items():
+            for vz, seite in ((1, "links"), (-1, "rechts")):
+                c = td.versatz(ach, vz * ab)
+                f = ogr.Feature(gl.GetLayerDefn())
+                f.SetField("Art", f"{typ} {seite}")
+                g = ogr.Geometry(ogr.wkbLineString)
+                for x, y in c:
+                    g.AddPoint_2D(float(x), float(y))
+                f.SetGeometry(g)
+                gl.CreateFeature(f)
+                for i in range(0, len(c), 40):          # Höhenpunkte auf jedem 40. Stützpunkt
+                    f = ogr.Feature(pl.GetLayerDefn())
+                    f.SetField("HOEHE", 99.0)
+                    f.SetField("HOEHE_FG", td.soll_hoehe(typ, s_ach[i], seite))
+                    g = ogr.Geometry(ogr.wkbPoint)
+                    g.AddPoint_2D(float(c[i, 0]), float(c[i, 1]))
+                    f.SetGeometry(g)
+                    pl.CreateFeature(f)
+        # eine Linie, deren Höhen aus dem DGM1 kommen sollen
+        f = ogr.Feature(gl.GetLayerDefn())
+        f.SetField("Hoe_Inf", "DGM")
+        g = ogr.Geometry(ogr.wkbLineString)
+        for x, y in td.versatz(ach, 70.0)[::20]:
+            g.AddPoint_2D(float(x), float(y))
+        f.SetGeometry(g)
+        gl.CreateFeature(f)
+        gds = pds = None
+        e7 = k.Einstellungen(ausgabe_ordner=os.path.join(d, "e_punkte"), punkte=os.path.join(d, "hp.shp"),
+                             gelaendelinien=os.path.join(d, "gelaende.shp"), dgm1=[os.path.join(d, "dgm1")])
+        log7 = []
+        r = k.ausfuehren(e7, log=log7.append)
+        assert any("HOEHE_FG" in z for z in log7), log7
+        assert any("Mosaik aus 2 Kacheln" in z for z in log7), log7
+        assert os.path.exists(os.path.join(d, "e_punkte", "DGM1_Mosaik.tif"))
+        kern = lies(r["differenz"], r["quelle"])
+        assert abs(np.median(kern) - 1.0) < 0.02, np.percentile(kern, [5, 50, 95])
+        pq_ds = ogr.Open(r["punkte"])
+        pq = pq_ds.GetLayer()
+        pq.SetAttributeFilter("quelle = 'linie_dgm'")
+        assert pq.GetFeatureCount() > 0, "DGM-Linie nicht aus dem DGM1 belegt"
+        print("Punkt-Layer + Geländelinien + Kacheln ok")
+
+        # 8) Sohle in das DGM1 einbrennen
+        sds = drv.CreateDataSource(os.path.join(d, "sohle.shp"))
+        sl = sds.CreateLayer("sohle", srs, ogr.wkbLineString25D)
+        f = ogr.Feature(sl.GetLayerDefn())
+        g = ogr.Geometry(ogr.wkbLineString25D)
+        for (x, y), s_ in zip(ach, s_ach):
+            g.AddPoint(float(x), float(y), 35.0 - 0.001 * s_)
+        f.SetGeometry(g)
+        sl.CreateFeature(f)
+        sds = None
+        e7.sohle, e7.sohle_puffer, e7.ausgabe_ordner = os.path.join(d, "sohle.shp"), 3.0, os.path.join(d, "e_sohle")
+        r = k.ausfuehren(e7, log=lambda m: None)
+        ds_s = gdal.Open(r["dgm_sohle"])
+        gt_s = ds_s.GetGeoTransform()
+        a_s = ds_s.ReadAsArray()
+        x, y = ach[200]
+        wert = a_s[int((gt_s[3] - y) // 1), int((x - gt_s[0]) // 1)]
+        assert abs(wert - (35.0 - 0.001 * s_ach[200])) < 0.05, wert
+        print("Sohle einbrennen ok")
     print("ALLE TESTS OK")
 
 
