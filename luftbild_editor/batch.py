@@ -26,10 +26,18 @@ class BatchJob:
     fmt: str
     suffix: str
     use_geometry: bool   # Zuschnitt und Drehung des aktuellen Bildes für alle
-    auto: bool = False   # Regler je Bild automatisch bestimmen
+    # Regler je Bild automatisch bestimmen: Variante (z. B. "streckung"), True = "standard"
+    auto: bool | str | None = False
     # eigener Zuschnitt/Drehung je Bild: path_key -> (rotation, crop)
     geometries: dict | None = None
+    # eigene Regler je Bild: path_key -> (Regler-Werte als dict, Automatik-Variante oder None)
+    per_image: dict | None = None
 
+
+TONAL_MODES = (
+    ("own", "Jedes Bild mit seiner eigenen Voreinstellung"),
+    ("same", "Einstellungen dieses Bildes für alle"),
+)
 
 GEOMETRY_MODES = (
     ("own", "Jedes Bild mit seinem eigenen Rahmen (✂)"),
@@ -40,12 +48,15 @@ GEOMETRY_MODES = (
 
 class BatchDialog(QDialog):
     def __init__(self, parent, source_name: str, files: list[str], start_dir: str,
-                 auto: bool = False, geometries: dict | None = None):
+                 auto: bool | str | None = False, geometries: dict | None = None,
+                 per_image: dict | None = None):
         super().__init__(parent)
         self.setWindowTitle("Stapelverarbeitung")
         self.resize(640, 560)
         self._start_dir = start_dir
         self._geometries = geometries or {}
+        self._per_image = per_image or {}
+        self._auto = auto
 
         lay = QVBoxLayout(self)
         info = QLabel(
@@ -71,13 +82,16 @@ class BatchDialog(QDialog):
         lay.addLayout(row)
 
         form = QFormLayout()
-        self.chk_auto = QCheckBox("Regler für jedes Bild automatisch anpassen")
-        self.chk_auto.setToolTip(
-            "Empfohlen, wenn die Bilder unterschiedlich sind (Stadt, Wald, Wiesen, Wasser, "
-            "hell oder dunkel): jedes Bild wird einzeln gemessen und eingestellt. "
-            "Sonst werden die Regler des aktuellen Bildes genau übernommen.")
-        self.chk_auto.setChecked(auto)
-        form.addRow(self.chk_auto)
+        self.tonal_mode = QComboBox()
+        for key, label in TONAL_MODES:
+            self.tonal_mode.addItem(label, key)
+        self.tonal_mode.setToolTip(
+            "Eigene Voreinstellung: jedes Bild so, wie es im Programm eingestellt ist – "
+            "Automatik-Voreinstellungen werden für jedes Bild einzeln gemessen. Bilder, die "
+            "nur hier hinzugefügt wurden, bekommen die Einstellungen des aktuellen Bildes.\n"
+            "Dieses Bild für alle: die Einstellungen des aktuellen Bildes (bei einer "
+            "Automatik: dieselbe Automatik, je Bild gemessen).")
+        form.addRow("Filter", self.tonal_mode)
         self.geo_mode = QComboBox()
         for key, label in GEOMETRY_MODES:
             self.geo_mode.addItem(label, key)
@@ -172,9 +186,11 @@ class BatchDialog(QDialog):
         files = [self.list.item(i).data(Qt.UserRole) for i in range(self.list.count())
                  if self.list.item(i).checkState() == Qt.Checked]
         mode = self.geo_mode.currentData()
+        own = self.tonal_mode.currentData() == "own"
         return BatchJob(files, self.folder.text().strip(), self.fmt.currentData(),
-                        self.suffix.text(), mode == "same", self.chk_auto.isChecked(),
-                        self._geometries if mode == "own" else None)
+                        self.suffix.text(), mode == "same", self._auto,
+                        self._geometries if mode == "own" else None,
+                        self._per_image if own else None)
 
 
 def run_batch(job: BatchJob, settings: P.Settings, progress=None, cancelled=None,
@@ -203,10 +219,14 @@ def run_batch(job: BatchJob, settings: P.Settings, progress=None, cancelled=None
                 s = replace(tonal, rotation=rotation, crop=crop)
             else:
                 s = tonal
+            variant = "standard" if job.auto is True else (job.auto or None)
+            if job.per_image and path_key(src) in job.per_image:
+                values, variant = job.per_image[path_key(src)]
+                s = P.with_tonal(s, values)
             s_img = s
-            if job.auto:
+            if variant:
                 geo = P.Settings(rotation=s.rotation, crop=s.crop)
-                s_img = P.with_tonal(s, P.auto_tonal(doc.prepare(geo)))
+                s_img = P.with_tonal(s, P.auto_tonal(doc.prepare(geo), variant))
             P.export(doc, s_img, out, job.fmt, nodata_safe=nodata_safe)
             written.append(out)
         except Exception as exc:  # ein defektes Bild soll den Stapel nicht abbrechen

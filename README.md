@@ -45,6 +45,12 @@ erscheint, wenn Pixel bei 0 oder 255 anstoßen.
 **Voreinstellungen** (benannt nach dem, was sie tun; Tooltip erklärt, wofür sie passen):
 - **Automatisch (empfohlen):** misst jedes Bild – Streckung, bei Bedarf leichtes Abflachen
   und Medianfilter, danach Hochpassfilter.
+- **Weitere Automatik-Varianten** (je Bild gemessen): *Auto: nur Streckung* (wie Strg+U in
+  IrfanView – nur lineare Streckung, kein Schärfen), *Auto: sanft schärfen*,
+  *Auto: Helligkeit halten*.
+- **Voreinstellung auf alle Bilder anwenden:** Voreinstellung anklicken, dann den Knopf unter
+  der Liste – Automatik-Varianten werden für jedes Bild einzeln gemessen. Danach alle mit der
+  Stapelverarbeitung speichern („Jedes Bild mit seiner eigenen Voreinstellung“).
 - **Histogrammstreckung** (linear auf 1–255, wie Abb. 1 der Bachelorarbeit), allein oder
   mit **Hochpassfilter**, **Tiefpassfilter**, **Medianfilter** bzw. **Medianfilter + Hochpassfilter**.
 - **Abflachen:** weich (Glockenform), stark (Ausgleich), Spitze kappen.

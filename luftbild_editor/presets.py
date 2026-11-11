@@ -22,6 +22,18 @@ _HP = {"sharpen_amount": 0.7, "sharpen_radius": 1.0, "sharpen_threshold": 0.008}
 # "Automatisch" ist ein Platzhalter: die Werte misst das Programm je Bild
 # (processing.auto_tonal).
 AUTO = "Automatisch (empfohlen)"
+# weitere Automatik-Varianten (Name -> Variante in processing.auto_tonal)
+AUTO_VARIANTS = {
+    AUTO: "standard",
+    "Auto: nur Streckung": "streckung",
+    "Auto: sanft schärfen": "sanft",
+    "Auto: Helligkeit halten": "hell_halten",
+}
+
+
+def auto_variant(name: str) -> str | None:
+    """Variante, wenn name eine Automatik-Voreinstellung ist, sonst None."""
+    return AUTO_VARIANTS.get(name)
 
 
 def _p(**kw):
@@ -33,6 +45,9 @@ def _p(**kw):
 BUILTIN_PRESETS: dict[str, dict] = {
     "Original": {},
     AUTO: {},
+    "Auto: nur Streckung": {},
+    "Auto: sanft schärfen": {},
+    "Auto: Helligkeit halten": {},
     # --- Streckung, einzeln und mit je einem Filter
     "Histogrammstreckung": _p(),
     "Streckung + Hochpassfilter": _p(**_HP),
@@ -64,6 +79,15 @@ PRESET_INFO: dict[str, str] = {
     AUTO: "Misst Helligkeit, Kontrast und Filmkorn dieses Bildes: Histogrammstreckung, "
           "bei sehr spitzem Histogramm leichtes Abflachen, bei starkem Korn Medianfilter, "
           "danach Hochpassfilter.",
+    "Auto: nur Streckung":
+        "Misst jedes Bild und streckt das Histogramm linear auf 1–255 – sonst nichts: "
+        "kein Gamma, kein Schärfen, kein Filter. Entspricht Strg+U in IrfanView.",
+    "Auto: sanft schärfen":
+        "Wie „nur Streckung“, dazu sehr schonendes Schärfen gröberer Kanten. Filmkorn "
+        "wird dabei nicht verstärkt.",
+    "Auto: Helligkeit halten":
+        "Streckung auf 1–255, die mittlere Helligkeit des Originals bleibt erhalten. "
+        "Kein Schärfen.",
     "Histogrammstreckung": "Streckung der Grauwerte auf 1–255; die mittlere Helligkeit "
                            "des Originals bleibt. Sonst nichts – für Bilder ohne Bildfehler.",
     "Streckung + Hochpassfilter": "Streckung, dann Hochpassfilter (Kanten betonen). "
@@ -103,11 +127,12 @@ PRESET_INFO: dict[str, str] = {
 
 def preset_values(name: str, prep=None, user: dict | None = None) -> dict | None:
     """Werte einer Voreinstellung; "Automatisch" wird für das Bild (prep) berechnet."""
-    if name == AUTO:
+    variant = auto_variant(name)
+    if variant:
         if prep is None:
             return None
         from .processing import auto_tonal
-        return auto_tonal(prep)
+        return auto_tonal(prep, variant)
     if user and name in user:
         return user[name]
     return BUILTIN_PRESETS.get(name)

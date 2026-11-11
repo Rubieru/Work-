@@ -773,7 +773,7 @@ def _apply_clahe(img, tables, strength, base_w, base_h, x0, y0, scale):
     return img + strength * (eq.astype(np.float32) - img)
 
 
-def auto_tonal(prep: Prepared) -> dict:
+def _auto_standard(prep: Prepared) -> dict:
     """Misst das Bild und schlägt passende Regler-Werte vor ("Automatisch").
 
     - Streckung auf den ganzen Grauwertbereich (schwarzer Rand zählt nicht)
@@ -817,6 +817,33 @@ def auto_tonal(prep: Prepared) -> dict:
         "keep_brightness": True, "median": median,
         "sharpen_amount": amount, "sharpen_radius": radius, "sharpen_threshold": thr,
     }
+
+
+AUTO_VARIANTS = ("standard", "streckung", "sanft", "hell_halten")
+
+
+def auto_tonal(prep: Prepared, variant: str = "standard") -> dict:
+    """Automatische Werte für das Bild in einer von mehreren Varianten.
+
+    standard     – bisherige Automatik (Streckung, Helligkeit halten, Hochpass, ggf. Median)
+    streckung    – nur lineare Histogrammstreckung, kein Gamma, kein Schärfen
+                   (entspricht „Auto-Anpassung“ Strg+U in IrfanView)
+    sanft        – wie streckung, dazu sehr schonendes Schärfen gröberer Kanten
+                   (hohe Schwelle: Filmkorn wird nicht verstärkt)
+    hell_halten  – Streckung mit erhaltener Helligkeit, ohne Schärfen
+    """
+    cache = prep.__dict__.setdefault("_auto_cache", {})
+    if variant in cache:
+        return dict(cache[variant])
+    if variant == "standard":
+        v = _auto_standard(prep)
+    else:
+        v = {"stretch": True, "clip_black": 0.1, "clip_white": 0.1, "stats_center": True,
+             "keep_brightness": variant == "hell_halten"}
+        if variant == "sanft":
+            v.update(sharpen_amount=0.35, sharpen_radius=1.6, sharpen_threshold=0.03)
+    cache[variant] = v
+    return dict(v)
 
 
 def filter_margin(prep: Prepared, s: Settings) -> int:

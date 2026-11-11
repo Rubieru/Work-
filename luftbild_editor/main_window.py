@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication
 from . import __version__
 from . import processing as P
 from . import theme
-from .presets import (AUTO, BUILTIN_PRESETS, PRESET_INFO, load_user_presets,
+from .presets import (BUILTIN_PRESETS, PRESET_INFO, auto_variant, load_user_presets,
                       save_user_presets)
 from .widgets import CurveWidget, HistogramWidget, ImageView, LabeledSlider
 
@@ -49,6 +49,8 @@ class ImageEntry:
     settings: P.Settings = field(default_factory=P.Settings)
     history: list = field(default_factory=lambda: [P.Settings()])
     hist_idx: int = 0
+    auto_variant: str | None = None   # Automatik-Variante, falls eine gewählt ist
+    auto_pending: bool = False        # Automatik beim nächsten Laden für dieses Bild messen
 
 
 class _Signals(QObject):
@@ -95,7 +97,6 @@ class MainWindow(QMainWindow):
         self._progress = None
         self._errors_shown = set()
         self._auto_cache = None
-        self._last_preset_auto = False
         self._last_crop = None   # Rahmen des zuletzt bearbeiteten Bildes (x, y, w, h)
 
         self.pool = QThreadPool.globalInstance()
@@ -219,6 +220,14 @@ class MainWindow(QMainWindow):
         row.addWidget(self.btn_save_preset)
         row.addWidget(self.btn_del_preset)
         ll.addLayout(row)
+        self.btn_preset_all = QPushButton("Voreinstellung auf alle Bilder anwenden")
+        self.btn_preset_all.setObjectName("primary")
+        self.btn_preset_all.setToolTip(
+            "Wendet die markierte Voreinstellung auf alle Bilder in der Liste an.\n"
+            "Automatik-Voreinstellungen werden für jedes Bild einzeln gemessen.\n"
+            "Danach alle zusammen mit der Stapelverarbeitung speichern.")
+        self.btn_preset_all.clicked.connect(self.apply_preset_to_all)
+        ll.addWidget(self.btn_preset_all)
         self._fill_preset_list()
 
         # ---- Mitte: Ansicht
@@ -829,6 +838,15 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"{os.path.basename(self.entry.path)}: {w} × {h} px, {bits}{dpi}{geo}", 12000)
         self._carry_crop()
+        if self.entry.auto_pending and self.entry.auto_variant:
+            variant = self.entry.auto_variant
+            values = P.auto_tonal(self.doc.prepare(P.Settings(
+                rotation=self.entry.settings.rotation, crop=self.entry.settings.crop)), variant)
+            s = P.with_tonal(self.entry.settings, values)
+            self.entry.settings = s
+            self.entry.history = [s]
+            self.entry.hist_idx = 0
+            self.entry.auto_pending = False
         self._sync_controls()
         self._update_enabled()
         self._on_tab(self.tabs.currentIndex())
@@ -999,11 +1017,12 @@ class MainWindow(QMainWindow):
             geo = P.Settings(rotation=base.rotation, crop=base.crop)
             prep = doc.prepare(geo)
             scale = min(1.0, THUMB_LONG_SIDE / prep.long_side)
-            auto = P.auto_tonal(prep)
+            auto = {}
             out = {}
             for name, values in presets.items():
-                if name == AUTO:
-                    values = auto
+                variant = auto_variant(name)
+                if variant:
+                    values = auto[variant] = P.auto_tonal(prep, variant)
                 s = P.with_tonal(geo, values)
                 out[name] = gray_qimage(P.to_uint(P.render(prep, s, None, scale), 8))
             log.info("Vorschaukacheln und Automatik in %.1f s", time.time() - t0)
@@ -1048,6 +1067,8 @@ class MainWindow(QMainWindow):
         if getattr(self.entry.settings, key) == value:
             return
         self.preset_list.clearSelection()
+        if key not in P.GEOMETRY_FIELDS:
+            self.entry.auto_variant = None   # Regler von Hand verändert
         self._set_settings(replace(self.entry.settings, **{key: value}))
         if key == "stretch":
             self._update_enabled()
@@ -1055,6 +1076,8 @@ class MainWindow(QMainWindow):
 
     def _apply_tonal(self, values):
         if self.entry:
+            self.entry.auto_variant = None
+            self.entry.auto_pending = False
             self._set_settings(P.with_tonal(self.entry.settings, values), sync=True)
             self._t_history.start(0)
 
@@ -1135,6 +1158,7 @@ class MainWindow(QMainWindow):
     def _update_enabled(self):
         has = self.doc is not None
         for w in (self.tabs, self.btn_export, self.btn_batch, self.btn_save_preset,
+                  self.btn_preset_all,
                   self.preset_list, self.btn_before):
             w.setEnabled(has)
         for a in (self.a_export, self.a_export_all, self.a_apply_all, self.a_close,
@@ -1366,35 +1390,66 @@ class MainWindow(QMainWindow):
                 item.setToolTip(PRESET_INFO[name])
             self.preset_list.addItem(item)
 
-    def _auto_values(self) -> dict:
+    def _auto_values(self, variant: str = "standard") -> dict:
         """Automatische Werte für das aktuelle Bild (aus dem Zwischenspeicher)."""
         s = self.entry.settings
         geometry = (s.rotation, s.crop)
-        if self._auto_cache and self._auto_cache[0] == geometry:
-            return self._auto_cache[1]
+        if self._auto_cache and self._auto_cache[0] == geometry \
+                and variant in self._auto_cache[1]:
+            return self._auto_cache[1][variant]
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             prep = self.doc.prepare(P.Settings(rotation=s.rotation, crop=s.crop))
-            values = P.auto_tonal(prep)
+            values = P.auto_tonal(prep, variant)
         finally:
             QApplication.restoreOverrideCursor()
-        self._auto_cache = (geometry, values)
+        if not (self._auto_cache and self._auto_cache[0] == geometry):
+            self._auto_cache = (geometry, {})
+        self._auto_cache[1][variant] = values
         return values
 
     def _apply_preset_item(self, item):
         name = item.data(Qt.UserRole)
-        if name == AUTO and self.doc:
-            values = self._auto_values()
-            self._last_preset_auto = True
+        variant = auto_variant(name)
+        if variant and self.doc:
+            values = self._auto_values(variant)
         else:
             values = self._all_presets().get(name)
-            self._last_preset_auto = False
+            variant = None
         if values is not None and self.entry:
             self._apply_tonal(values)
+            self.entry.auto_variant = variant
             if self.tabs.currentIndex() != 1:
                 self.tabs.setCurrentIndex(1)  # Ergebnis sofort sichtbar machen
             item.setSelected(True)
             self._update_enabled()
+
+    def apply_preset_to_all(self):
+        """Markierte Voreinstellung auf alle Bilder der Liste anwenden."""
+        item = self.preset_list.currentItem()
+        if not self.entry or item is None or not item.isSelected():
+            QMessageBox.information(self, "Voreinstellung wählen",
+                                    "Bitte zuerst links eine Voreinstellung anklicken.")
+            return
+        name = item.data(Qt.UserRole)
+        variant = auto_variant(name)
+        values = None if variant else self._all_presets().get(name)
+        for e in self.entries:
+            if e is self.entry:
+                continue
+            if variant:
+                # wird beim Öffnen des Bildes bzw. beim Speichern für jedes Bild gemessen
+                e.auto_variant, e.auto_pending = variant, True
+            elif values is not None:
+                e.settings = P.with_tonal(e.settings, values)
+                e.auto_variant, e.auto_pending = None, False
+                del e.history[e.hist_idx + 1:]
+                e.history.append(e.settings)
+                e.hist_idx = len(e.history) - 1
+        self._apply_preset_item(item)
+        self.statusBar().showMessage(
+            f"„{name}“ auf {len(self.entries)} Bilder angewendet – jetzt mit der "
+            "Stapelverarbeitung (Strg+B) alle zusammen speichern.", 10000)
 
     def save_preset(self):
         if not self.entry:
@@ -1473,9 +1528,11 @@ class MainWindow(QMainWindow):
         files = [self.entry.path] + [e.path for e in self.entries if e is not self.entry]
         geometries = {path_key(e.path): (e.settings.rotation, e.settings.crop)
                       for e in self.entries}
+        per_image = {path_key(e.path): (P.tonal_dict(e.settings), e.auto_variant)
+                     for e in self.entries}
         dlg = BatchDialog(self, os.path.basename(self.entry.path), files,
-                          os.path.dirname(self.entry.path), auto=self._last_preset_auto,
-                          geometries=geometries)
+                          os.path.dirname(self.entry.path), auto=self.entry.auto_variant,
+                          geometries=geometries, per_image=per_image)
         if dlg.exec() != BatchDialog.Accepted:
             return
         job = dlg.job()
@@ -1483,7 +1540,8 @@ class MainWindow(QMainWindow):
         # Regler (und ggf. den gemeinsamen Rahmen) auch in der Liste übernehmen
         chosen = {path_key(f) for f in job.files}
         for e in self.entries:
-            if e is not self.entry and path_key(e.path) in chosen and not job.auto:
+            if e is not self.entry and path_key(e.path) in chosen and job.per_image is None \
+                    and not job.auto:
                 e.settings = settings if job.use_geometry else P.with_tonal(
                     e.settings, P.tonal_dict(settings))
                 del e.history[e.hist_idx + 1:]

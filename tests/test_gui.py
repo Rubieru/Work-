@@ -337,8 +337,10 @@ def test_crop_workflow_carry_frame_and_batch_with_own_crops(app, tmp_path, monke
     assert all(win.image_list.item(i).text().startswith("✂") for i in range(3))
 
     # Stapelverarbeitung: jedes Bild mit eigenem Rahmen und automatischen Reglern
+    win.entry.auto_variant = "standard"
+
     def fake_exec(dlg):
-        dlg.chk_auto.setChecked(True)
+        dlg.tonal_mode.setCurrentIndex(dlg.tonal_mode.findData("same"))
         dlg.geo_mode.setCurrentIndex(dlg.geo_mode.findData("own"))
         return B.BatchDialog.Accepted
     monkeypatch.setattr(B.BatchDialog, "exec", fake_exec)
@@ -404,3 +406,60 @@ def test_batch_dialog_warns_about_images_without_frame(app, tmp_path, monkeypatc
     app.processEvents()
     from PySide6.QtCore import QCoreApplication, QEvent
     QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+
+def test_auto_variants():
+    from tests.sample import synthetic_aerial as sa
+    img = np.clip(0.3 + 0.4 * sa(600, 500)[40:-40, 40:-40], 0, 1).astype(np.float32)
+    prep = P.Document(P.LoadedImage(img, 16, None)).prepare(P.Settings())
+    for variant in P.AUTO_VARIANTS:
+        v = P.auto_tonal(prep, variant)
+        out = P.render(prep, P.with_tonal(P.Settings(), v))
+        assert out.min() < 0.05 and out.max() > 0.95, variant
+    plain = P.auto_tonal(prep, "streckung")
+    assert plain.get("sharpen_amount", 0) == 0 and not plain["keep_brightness"]
+    assert P.auto_tonal(prep, "sanft")["sharpen_threshold"] >= 0.02
+
+
+def test_preset_to_all_and_batch_with_own_presets(app, tmp_path, monkeypatch):
+    from luftbild_editor import batch as B
+    from luftbild_editor.main_window import MainWindow
+    monkeypatch.setattr("PySide6.QtCore.QStandardPaths.writableLocation",
+                        lambda *_: str(tmp_path / "cfg"))
+    files = []
+    for i, scale in enumerate((0.3, 0.6, 0.9)):    # unterschiedlich helle Scans
+        f = tmp_path / f"s{i}.tif"
+        img = 0.05 + scale * synthetic_aerial(400, 300, seed=i)[20:-20, 20:-20]
+        P.save_image(str(f), P.to_uint(np.clip(img, 0, 1), 8), "tif8")
+        files.append(str(f))
+    win = MainWindow()
+    win.show()
+    win.add_files(files)
+    wait(app)
+    name = "Auto: nur Streckung"
+    item = next(win.preset_list.item(i) for i in range(win.preset_list.count())
+                if win.preset_list.item(i).text() == name)
+    win.preset_list.setCurrentItem(item)
+    item.setSelected(True)
+    win.apply_preset_to_all()
+    wait(app)
+    assert all(e.auto_variant == "streckung" for e in win.entries)
+    # ein anderes Bild öffnen: Automatik wird dort gemessen und angewendet
+    win.image_list.setCurrentRow(2)
+    wait(app)
+    assert win.entry.settings.stretch and not win.entry.auto_pending
+
+    def fake_exec(dlg):
+        assert dlg.tonal_mode.currentData() == "own"
+        return B.BatchDialog.Accepted
+    monkeypatch.setattr(B.BatchDialog, "exec", fake_exec)
+    monkeypatch.setattr("luftbild_editor.main_window.QMessageBox.information", lambda *a: None)
+    win.batch()
+    wait(app)
+    outs = sorted((tmp_path / "bearbeitet").iterdir())
+    assert len(outs) == 3
+    for o in outs:   # jedes Bild einzeln gestreckt, auch das dunkle und das helle
+        loaded = P.load_image(str(o))
+        a = loaded.data.astype(float) * (255.0 / (65535.0 if loaded.bits == 16 else 255.0))
+        assert np.percentile(a, 0.5) < 25 and np.percentile(a, 99.5) > 230, o.name
+    win.close()
