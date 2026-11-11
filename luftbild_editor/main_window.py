@@ -1069,6 +1069,10 @@ class MainWindow(QMainWindow):
         self.preset_list.clearSelection()
         if key not in P.GEOMETRY_FIELDS:
             self.entry.auto_variant = None   # Regler von Hand verändert
+        if key in ("clip_black", "clip_white", "stretch_buffer", "stats_center", "stretch") \
+                and self.entry.settings.levels:
+            # fester Schwarz-/Weißpunkt (Bachelorarbeit) gilt nicht mehr
+            self._set_settings(replace(self.entry.settings, levels=()))
         self._set_settings(replace(self.entry.settings, **{key: value}))
         if key == "stretch":
             self._update_enabled()

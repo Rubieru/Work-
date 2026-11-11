@@ -264,3 +264,26 @@ def test_keep_brightness_stretches_without_brightening():
     assert np.median(lin) > med + 0.03                  # lineare Streckung hellt auf
     assert abs(float(np.median(keep)) - med) < 0.02     # Helligkeit bleibt
     assert keep.max() > 0.95 and keep.min() < 0.05      # trotzdem ganzer Bereich
+
+
+def test_bachelor_script_levels_match_script():
+    # Nachbildung von Batch_bearbeitung.py: Schwarzpunkt global (0,5 %), Weißpunkt aus der
+    # Bildmitte (99,5 %, 20 % Rand ignoriert), Pixel = 0 zählen nicht
+    rng = np.random.default_rng(5)
+    img = np.clip(rng.normal(0.45, 0.12, (500, 600)), 0.02, 0.9).astype(np.float32)
+    img[:40, :] = 1.0                  # helle "Wolke" am Rand – darf Weißpunkt nicht ziehen
+    img[-20:, :] = 0.0                 # NoData-Rand
+    doc = P.Document(P.LoadedImage(img, 16, None))
+    prep = doc.prepare(P.Settings())
+    v = P.auto_tonal(prep, "skript")
+    valid = img[img > 0]
+    center = img[100:400, 120:480]
+    lo, hi = np.percentile(valid, 0.5), np.percentile(center[center > 0], 99.5)
+    assert v["levels"][0] == pytest.approx(lo, abs=0.01)
+    assert v["levels"][1] == pytest.approx(hi, abs=0.01)
+    assert v.get("sharpen_amount", 0) == 0 and not v["keep_brightness"]
+    out = P.render(prep, P.with_tonal(P.Settings(), v))
+    mid = out[100:400, 120:480]
+    np.testing.assert_allclose(mid, np.clip((center - lo) / (hi - lo), 0, 1), atol=0.005)
+    s = P.with_tonal(P.Settings(), v)
+    assert P.settings_from_json(P.settings_to_json(s)) == s

@@ -61,6 +61,7 @@ class Settings:
     equalize: float = 0.0          # Kontrastausgleich je Bildbereich (CLAHE) 0..1
     hist_flat: float = 0.0         # Histogramm abflachen (global) 0..1
     hist_mode: str = "glocke"      # glocke | gleichmaessig | begrenzt
+    levels: tuple = ()             # fester Schwarz-/Weißpunkt (0..1) statt Perzentilen
     curve: tuple = ()              # Gradationskurve: ((x, y), ...) zwischen (0,0) und (1,1)
     clarity: float = 0.0           # lokaler Kontrast 0..1
 
@@ -87,6 +88,8 @@ def with_tonal(s: Settings, values: dict) -> Settings:
     clean = {k: v for k, v in values.items() if k in TONAL_FIELDS}
     if "curve" in clean:
         clean["curve"] = tuple(tuple(float(v) for v in p) for p in clean["curve"] or ())
+    if "levels" in clean:
+        clean["levels"] = tuple(float(v) for v in clean["levels"] or ())
     defaults = tonal_dict(Settings())
     defaults.update(clean)
     return replace(s, **defaults)
@@ -111,6 +114,8 @@ def settings_from_json(d: dict) -> Settings:
         d["crop"] = tuple(int(v) for v in d["crop"])
     if "curve" in d:
         d["curve"] = tuple(tuple(float(v) for v in p) for p in d["curve"] or ())
+    if "levels" in d:
+        d["levels"] = tuple(float(v) for v in d["levels"] or ())
     return Settings(**d)
 
 
@@ -549,6 +554,8 @@ def compute_levels(prep: Prepared, s: Settings) -> tuple[float, float]:
     """Schwarz- und Weißpunkt der Histogrammstreckung (ohne Rahmen gemessen)."""
     if not s.stretch:
         return 0.0, 1.0
+    if len(s.levels) == 2 and s.levels[1] > s.levels[0]:
+        return float(s.levels[0]), float(s.levels[1])
     sample = stats_sample(prep, s, _stats_tonal(prep, s))
     lo, hi = np.percentile(sample, [s.clip_black, 100.0 - s.clip_white])
     lo, hi = float(lo), float(hi)
@@ -819,7 +826,29 @@ def _auto_standard(prep: Prepared) -> dict:
     }
 
 
-AUTO_VARIANTS = ("standard", "streckung", "sanft", "hell_halten")
+AUTO_VARIANTS = ("standard", "streckung", "sanft", "hell_halten", "skript")
+
+
+def _levels_bachelor(prep: Prepared) -> tuple[float, float]:
+    """Schwarz-/Weißpunkt wie im Skript der Bachelorarbeit (Batch_bearbeitung.py).
+
+    Schwarzpunkt: 0,5-%-Wert des ganzen Bildes (rettet dunkle Felder).
+    Weißpunkt: 99,5-%-Wert der Bildmitte – je 20 % Rand bleiben außen vor (ignoriert
+    Wolken und Beschriftung am Rand). Pixel mit Wert 0 (NoData) zählen nicht.
+    """
+    img = as_float(prep.stats)
+    valid = img[img > 0]
+    if valid.size == 0:
+        return 0.0, 1.0
+    lo = float(np.percentile(valid, 0.5))
+    h, w = img.shape
+    my, mx = int(h * 0.2), int(w * 0.2)
+    center = img[my:h - my, mx:w - mx]
+    center = center[center > 0]
+    hi = float(np.percentile(center if center.size else valid, 99.5))
+    if hi <= lo:
+        return 0.0, 1.0
+    return lo, hi
 
 
 def auto_tonal(prep: Prepared, variant: str = "standard") -> dict:
@@ -831,12 +860,17 @@ def auto_tonal(prep: Prepared, variant: str = "standard") -> dict:
     sanft        – wie streckung, dazu sehr schonendes Schärfen gröberer Kanten
                    (hohe Schwelle: Filmkorn wird nicht verstärkt)
     hell_halten  – Streckung mit erhaltener Helligkeit, ohne Schärfen
+    skript       – wie das Skript der Bachelorarbeit: Schwarzpunkt aus dem ganzen Bild,
+                   Weißpunkt aus der Bildmitte, lineare Streckung, sonst nichts
     """
     cache = prep.__dict__.setdefault("_auto_cache", {})
     if variant in cache:
         return dict(cache[variant])
     if variant == "standard":
         v = _auto_standard(prep)
+    elif variant == "skript":
+        v = {"stretch": True, "levels": _levels_bachelor(prep), "keep_brightness": False,
+             "stats_center": False, "protect": False}   # hart abschneiden wie im Skript
     else:
         v = {"stretch": True, "clip_black": 0.1, "clip_white": 0.1, "stats_center": True,
              "keep_brightness": variant == "hell_halten"}

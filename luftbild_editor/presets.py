@@ -28,6 +28,7 @@ AUTO_VARIANTS = {
     "Auto: nur Streckung": "streckung",
     "Auto: sanft schärfen": "sanft",
     "Auto: Helligkeit halten": "hell_halten",
+    "Bachelorarbeit bearbeitung": "skript",
 }
 
 
@@ -45,6 +46,7 @@ def _p(**kw):
 BUILTIN_PRESETS: dict[str, dict] = {
     "Original": {},
     AUTO: {},
+    "Bachelorarbeit bearbeitung": {},
     "Auto: nur Streckung": {},
     "Auto: sanft schärfen": {},
     "Auto: Helligkeit halten": {},
@@ -79,6 +81,11 @@ PRESET_INFO: dict[str, str] = {
     AUTO: "Misst Helligkeit, Kontrast und Filmkorn dieses Bildes: Histogrammstreckung, "
           "bei sehr spitzem Histogramm leichtes Abflachen, bei starkem Korn Medianfilter, "
           "danach Hochpassfilter.",
+    "Bachelorarbeit bearbeitung":
+        "Wie das Skript der Bachelorarbeit (Batch_bearbeitung.py): Schwarzpunkt = 0,5 % "
+        "des ganzen Bildes, Weißpunkt = 99,5 % der Bildmitte (20 % Rand bleiben außen vor, "
+        "damit Wolken und Beschriftung nicht stören). Lineare Streckung auf 1–255, "
+        "kein Gamma, kein Schärfen. Wird für jedes Bild einzeln gemessen.",
     "Auto: nur Streckung":
         "Misst jedes Bild und streckt das Histogramm linear auf 1–255 – sonst nichts: "
         "kein Gamma, kein Schärfen, kein Filter. Entspricht Strg+U in IrfanView.",
