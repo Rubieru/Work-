@@ -12,7 +12,8 @@ from PySide6.QtCore import (QEvent, QObject, QRunnable, QSettings, QSize, QStand
                             QUrl,
                             QThreadPool, QTimer, Signal)
 from PySide6.QtGui import QAction, QDesktopServices, QIcon, QImage, QKeySequence, QPixmap
-from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QButtonGroup, QCheckBox,
+from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QDialog,
+                               QDialogButtonBox, QPlainTextEdit, QButtonGroup, QCheckBox,
                                QComboBox,
                                QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
                                QInputDialog, QLabel, QLineEdit, QListWidget,
@@ -606,6 +607,9 @@ class MainWindow(QMainWindow):
             f"<b>{theme.APP_NAME}</b><br>Version {__version__}<br><br>"
             "Zuschneiden, Kontrast und Schärfe für historische Luftbilder."))
         m_help.addAction(a_about)
+        a_lic = QAction("Lizenzen …", self)
+        a_lic.triggered.connect(self.show_licenses)
+        m_help.addAction(a_lic)
 
         def act(text, slot, shortcut=None, menu=None, toolbar=False):
             a = QAction(text, self)
@@ -1427,6 +1431,26 @@ class MainWindow(QMainWindow):
                 self.tabs.setCurrentIndex(1)  # Ergebnis sofort sichtbar machen
             item.setSelected(True)
             self._update_enabled()
+
+    def show_licenses(self):
+        """Lizenzhinweise der verwendeten Bibliotheken anzeigen."""
+        path = os.path.join(theme.RESOURCES, "LIZENZEN.txt")
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            text = "Die Lizenzdatei wurde nicht gefunden."
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Lizenzen")
+        dlg.resize(700, 560)
+        lay = QVBoxLayout(dlg)
+        view = QPlainTextEdit(text)
+        view.setReadOnly(True)
+        lay.addWidget(view)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dlg.reject)
+        lay.addWidget(buttons)
+        dlg.exec()
 
     def apply_preset_to_all(self):
         """Markierte Voreinstellung auf alle Bilder der Liste anwenden."""

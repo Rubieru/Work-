@@ -1,0 +1,43 @@
+Luftbild-Editor PZU – verwendete Software und Lizenzen
+=====================================================
+
+Das Programm ist in Python geschrieben und nutzt die folgenden frei verfügbaren
+Bibliotheken. Alle erlauben die Nutzung auch im gewerblichen Umfeld.
+
+Python
+  Lizenz: Python Software Foundation License (PSF)
+  https://docs.python.org/3/license.html
+
+Qt for Python (PySide6) und Qt 6
+  Lizenz: GNU Lesser General Public License v3 (LGPL-3.0)
+  https://www.qt.io/licensing/  ·  https://www.gnu.org/licenses/lgpl-3.0.html
+  Die Qt-Bibliotheken liegen als einzelne Dateien im Programmordner und können
+  gegen eine andere, kompatible Version ausgetauscht werden. Quellcode von Qt:
+  https://download.qt.io/
+
+OpenCV (opencv-python-headless)
+  Lizenz: Apache License 2.0
+  https://opencv.org/license/  ·  https://www.apache.org/licenses/LICENSE-2.0
+
+NumPy
+  Lizenz: BSD 3-Clause
+  https://numpy.org/doc/stable/license.html
+
+tifffile
+  Lizenz: BSD 3-Clause
+  https://github.com/cgohlke/tifffile
+
+imagecodecs
+  Lizenz: BSD 3-Clause (eingebundene Codec-Bibliotheken unter eigenen freien Lizenzen,
+  siehe https://github.com/cgohlke/imagecodecs)
+
+PyInstaller (zum Erstellen der .exe)
+  Lizenz: GPL-2.0 mit Ausnahme für erzeugte Programme – die erzeugte .exe darf
+  unter beliebiger Lizenz genutzt und weitergegeben werden.
+  https://pyinstaller.org/en/stable/license.html
+
+Logo und Farben: Plan-Zentrum Umwelt GmbH.
+
+Die Bildverarbeitung verwendet Standardverfahren (Histogrammstreckung, Unscharf
+maskieren, Median- und Tiefpassfilter, CLAHE). Der Programmcode wurde für dieses
+Programm neu geschrieben.
