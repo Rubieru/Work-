@@ -118,6 +118,27 @@ def _text_box(tm: np.ndarray):
     return float(x0), float(y0), float(x1), float(y1), xs, ys
 
 
+def _whiteness(doc: P.Document, small: np.ndarray) -> np.ndarray:
+    """0..1: wie sehr ein Pixel nach Papier aussieht – hell und wenig gesättigt."""
+    h, w = small.shape
+    col = np.clip(P.as_float(cv2.resize(doc.color, (w, h), interpolation=cv2.INTER_AREA)),
+                  0, 1)
+    hsv = cv2.cvtColor((col * 255).astype(np.uint8), cv2.COLOR_RGB2HSV).astype(np.float32)
+    return (hsv[..., 2] / 255.0) * (1.0 - hsv[..., 1] / 255.0)
+
+
+def _smoothness(small: np.ndarray) -> np.ndarray:
+    """0..1: Anteil glatter Stellen in der Umgebung. Papier ist zwischen der Schrift glatt,
+    Holzmaserung, Teppich oder Stoff haben überall feine Struktur. Hilft bei Graubildern,
+    in denen Papier und heller Tisch gleich hell aussehen."""
+    g = cv2.GaussianBlur(small, (0, 0), 1.0)
+    gx = cv2.Sobel(g, cv2.CV_32F, 1, 0)
+    gy = cv2.Sobel(g, cv2.CV_32F, 0, 1)
+    flat = (np.sqrt(gx * gx + gy * gy) < 0.03).astype(np.float32)
+    k = max(5, int(max(small.shape) * 0.03) | 1)
+    return np.clip(cv2.blur(flat, (k, k)) / 0.3, 0.0, 1.0)
+
+
 def _paper_mask(doc: P.Document, small: np.ndarray, tmask: np.ndarray, text):
     """Maske der Pixel in Papierfarbe (Lab bei Farbbildern, sonst Helligkeit)."""
     h, w = small.shape
@@ -154,20 +175,31 @@ def detect_sheet(doc: P.Document, margin: float = 0.01):
     """
     small, f0, _ = _small_rotated(doc, 0.0)
     h, w = small.shape
-    blur = cv2.GaussianBlur(small, (0, 0), max(1.0, max(h, w) / 400))
+    sigma = max(1.0, max(h, w) / 400)
+    # Merkmal "Papier": bei Farbfotos hell UND farblos (ein heller Holztisch ist ähnlich
+    # hell wie Papier, aber deutlich farbiger), bei Graubildern die Helligkeit
+    feature = _whiteness(doc, small) if doc.is_color else small * _smoothness(small)
+    blur = cv2.GaussianBlur(feature, (0, 0), sigma)
     u8 = np.clip(blur * 255, 0, 255).astype(np.uint8)
     candidates = []
-    # 1) helle Fläche (Otsu), 2) Fläche innerhalb starker Kanten
+    # 1) papierartige Fläche (Otsu), 2) Fläche innerhalb starker Kanten
     t1, bright = cv2.threshold(u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     candidates.append(bright)
     # zweite, höhere Schwelle nur unter den hellen Pixeln: trennt Papier von Händen,
     # die das Blatt berühren (Haut ist meist dunkler als Papier)
     upper = u8[u8 > t1]
+    brightest = bright
     if upper.size > 100:
         t2, _ = cv2.threshold(upper.reshape(-1, 1), 0, 255,
                               cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         for t in (t2, (t1 + t2) / 2):
             candidates.append(((u8 > t) * 255).astype(np.uint8))
+        # hellste Klasse = Papier, sofern sie groß genug ist (sehr dunkle Dinge wie Stuhl
+        # oder Schuh ziehen die erste Schwelle so weit herunter, dass ein heller Tisch
+        # noch als "hell" gilt)
+        top = ((u8 > t2) * 255).astype(np.uint8)
+        if (top > 0).mean() >= 0.05:
+            brightest = top
     edges = cv2.Canny(u8, 30, 90)
     edges = cv2.dilate(edges, np.ones((5, 5), np.uint8))
     filled = np.zeros_like(edges)
@@ -175,10 +207,16 @@ def detect_sheet(doc: P.Document, margin: float = 0.01):
     cv2.drawContours(filled, cnts, -1, 255, -1)
     candidates.append(filled)
 
+    # Schrift nur auf papierartigem Untergrund zählen (Holzmaserung, Teppich, Stoff sehen
+    # sonst aus wie Schrift)
+    tmask = text_mask(small)
+    kk = max(5, int(max(h, w) * 0.03) | 1)
+    paperish = cv2.morphologyEx(brightest, cv2.MORPH_CLOSE,
+                                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kk, kk)))
+    tmask &= paperish > 0
+    text = _text_box(tmask)
     # 3) Papierfarbe: rund um die Schrift gemessen; zum Blatt gehört, was diese Farbe hat
     #    (trennt Papier von Händen und Tisch, auch wenn sie gleich hell sind)
-    tmask = text_mask(small)
-    text = _text_box(tmask)
     if text is not None:
         paper = _paper_mask(doc, small, tmask, text)
         if paper is not None:

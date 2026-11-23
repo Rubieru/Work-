@@ -123,3 +123,42 @@ def test_text_mask_ignores_hand_and_table():
     # Schrift liegt im Blatt (Mitte), nicht bei Hand (rechts unten) oder Stift (links oben)
     assert xs.size > 200
     assert np.mean((xs > 0.25 * tm.shape[1]) & (xs < 0.75 * tm.shape[1])) > 0.9
+
+
+def wood_table_photo(seed=0, w=1600, h=730, sheet=(560, 15, 1080, 715), tilt=1.0):
+    """Wie echte Archivfotos: weißes Blatt mit Schrift auf hellem, gemasertem Holztisch
+    (ähnlich hell wie Papier, aber orange), dunkler Stuhl rechts, Schuh links."""
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    grain = np.sin(xx / 7.0 + 3 * np.sin(yy / 90.0) + rng.normal(0, 0.3)) * 0.5 + 0.5
+    grain = cv2.GaussianBlur(grain, (0, 0), 1.2)
+    base = 0.80 + 0.12 * grain + rng.normal(0, 0.02, (h, w)).astype(np.float32)
+    rgb = np.dstack([base * 1.0, base * 0.70, base * 0.35])            # orange Holz
+    x0, y0, x1, y1 = sheet
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    box = cv2.boxPoints(((cx, cy), (x1 - x0, y1 - y0), tilt)).astype(np.int32)
+    paper = np.zeros((h, w), np.uint8)
+    cv2.fillPoly(paper, [box], 255)
+    rgb[paper > 0] = (0.93, 0.93, 0.95)
+    text = np.zeros((h, w), np.uint8)
+    for y in range(y0 + 60, y1 - 40, 28):
+        cv2.putText(text, "Bericht an den Landrat 1944", (x0 + 40, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, 255, 1)
+    rgb[text > 0] = (0.2, 0.2, 0.25)
+    rgb[:, int(w * 0.93):] = (0.12, 0.13, 0.16)                       # Stuhl
+    cv2.circle(rgb, (0, h // 2), 80, (0.1, 0.1, 0.1), -1)              # Schuh
+    return np.clip(rgb, 0, 1)
+
+
+@pytest.mark.parametrize("gray", [False, True])
+def test_sheet_on_bright_wood_table(gray):
+    rgb = wood_table_photo()
+    u8 = P.to_uint(rgb, 8)
+    g = cv2.cvtColor(u8, cv2.COLOR_RGB2GRAY)
+    doc = P.Document(P.LoadedImage(g, 8, None, None, None if gray else u8))
+    rotation, (x, y, w, h) = A.detect_sheet(doc)
+    # Ausschnitt ≈ Blatt (560..1080 x 15..715), kein Holz
+    assert abs(x - 560) < 30 and abs(x + w - 1080) < 30
+    assert y < 40 and y + h > 690
+    base = P.as_float(doc.prepare(P.Settings(rotation=rotation, crop=(x, y, w, h))).base)
+    assert (base > 0.8).mean() > 0.85
