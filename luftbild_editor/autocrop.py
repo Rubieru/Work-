@@ -31,15 +31,34 @@ def content_mask(doc: P.Document, rotation: float = 0.0):
     return P.frame_mask(small), f, canvas
 
 
+def has_scan_frame(valid: np.ndarray) -> bool:
+    """Liegt ein Scanrahmen vor? Er umgibt das Bild auf mindestens drei Seiten.
+
+    Ein dunkler Gegenstand nur an einer Seite (Stuhl, Schatten, Tischkante in einem
+    Archivfoto) ist kein Scanrahmen – dann soll nicht danach ausgerichtet werden.
+    """
+    h, w = valid.shape
+    a, b = max(1, int(0.012 * h)), max(2, int(0.03 * h))
+    c, d = max(1, int(0.012 * w)), max(2, int(0.03 * w))
+    sides = [valid[a:b, :], valid[h - b:h - a, :], valid[:, c:d], valid[:, w - d:w - c]]
+    # ein Scanrahmen läuft über (fast) die ganze Seite
+    framed = sum(1 for s in sides if s.size and (1.0 - s.mean()) >= 0.75)
+    return framed >= 3
+
+
 def align_to_content(doc: P.Document, rotation: float, size: tuple[int, int] | None,
-                     near: tuple[int, int] | None = None) -> tuple[int, int, int, int]:
+                     near: tuple[int, int] | None = None
+                     ) -> tuple[int, int, int, int] | None:
     """Zuschnitt im gedrehten Bild, der möglichst nur Bildinhalt enthält.
+    None, wenn kein Scanrahmen erkannt wird (z. B. Archivfoto) – dann nichts ändern.
 
     size: feste Rahmengröße (Breite, Höhe) in Pixeln; None = größter Rahmen innerhalb
     des Inhalts. Unter den gleich guten Lagen wird die gewählt, die dem Inhalt mittig
     liegt (bzw. am nächsten an `near`, der bisherigen Rahmenmitte).
     """
     valid, f, (W, H) = content_mask(doc, rotation)
+    if not has_scan_frame(valid):
+        return None
     h, w = valid.shape
     ys, xs = np.nonzero(valid)
     if xs.size == 0:

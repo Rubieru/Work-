@@ -162,3 +162,14 @@ def test_sheet_on_bright_wood_table(gray):
     assert y < 40 and y + h > 690
     base = P.as_float(doc.prepare(P.Settings(rotation=rotation, crop=(x, y, w, h))).base)
     assert (base > 0.8).mean() > 0.85
+
+
+def test_aerial_alignment_leaves_archive_photos_alone():
+    # dunkler Stuhl nur an einer Seite ist kein Scanrahmen -> nicht ausrichten
+    u8 = P.to_uint(wood_table_photo(), 8)
+    doc = P.Document(P.LoadedImage(cv2.cvtColor(u8, cv2.COLOR_RGB2GRAY), 8, None, None, u8))
+    assert A.align_to_content(doc, 0.0, None) is None
+    assert A.align_to_content(doc, 0.0, (500, 400)) is None
+    # Luftbild mit Scanrahmen weiterhin
+    img, _ = framed_aerial(90, 130)
+    assert A.align_to_content(P.Document(P.LoadedImage(img, 16, None)), 0.0, None) is not None

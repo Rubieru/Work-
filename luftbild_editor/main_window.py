@@ -365,8 +365,9 @@ class MainWindow(QMainWindow):
 
         ga = QGroupBox("Automatisch zuschneiden")
         la = QVBoxLayout(ga)
+        la.addWidget(QLabel("<b>Für Luftbilder</b> (schwarzer Scanrahmen):"))
         row = QHBoxLayout()
-        b = QPushButton("Rahmen an Bildinhalt ausrichten")
+        b = QPushButton("Rahmen am Scanrahmen ausrichten")
         b.setToolTip(
             "Luftbilder: erkennt den schwarzen Scanrahmen mit Messmarken und Beschriftung "
             "und legt den Rahmen in den Bildinhalt.\n"
@@ -386,8 +387,9 @@ class MainWindow(QMainWindow):
         self.chk_auto_align.setChecked(QSettings().value("auto_align", True, type=bool))
         self.chk_auto_align.toggled.connect(lambda v: QSettings().setValue("auto_align", v))
         la.addWidget(self.chk_auto_align)
+        la.addWidget(QLabel("<b>Für Archivfotos</b> (Blatt auf Tisch o. Ä.):"))
         row = QHBoxLayout()
-        b = QPushButton("Blatt erkennen (Archivalien)")
+        b = QPushButton("Blatt erkennen")
         b.setToolTip(
             "Fotos aus dem Archiv: findet das Blatt Papier, dreht es gerade und schneidet "
             "Tisch, Hände, Stifte usw. weg. Nicht pixelgenau – danach bei Bedarf "
@@ -923,10 +925,11 @@ class MainWindow(QMainWindow):
         aligned = False
         if self.chk_auto_align.isChecked():
             try:
-                crop = autocrop.align_to_content(
+                found = autocrop.align_to_content(
                     self.doc, self.entry.settings.rotation, (cw, ch),
                     near=(crop[0] + cw // 2, crop[1] + ch // 2))
-                aligned = True
+                if found is not None:      # ohne Scanrahmen (Archivfoto): nicht verschieben
+                    crop, aligned = found, True
             except Exception:  # Erkennung ist nur eine Hilfe
                 log.exception("Automatisches Ausrichten fehlgeschlagen")
         s = replace(self.entry.settings, crop=crop)
@@ -955,6 +958,12 @@ class MainWindow(QMainWindow):
             crop = autocrop.align_to_content(self.doc, s.rotation, size, near)
         finally:
             QApplication.restoreOverrideCursor()
+        if crop is None:
+            QMessageBox.information(
+                self, "Kein Scanrahmen",
+                "In diesem Bild wurde kein schwarzer Scanrahmen gefunden – der Rahmen bleibt "
+                "unverändert.\n\nFür Fotos aus dem Archiv bitte „Blatt erkennen“ verwenden.")
+            return
         self._set_crop(crop)
         self.statusBar().showMessage(
             f"Rahmen {crop[2]} × {crop[3]} px an den Bildinhalt gelegt – bei Bedarf fein "
@@ -1013,8 +1022,11 @@ class MainWindow(QMainWindow):
                     else:
                         near = (crop[0] + crop[2] // 2, crop[1] + crop[3] // 2) if crop \
                             else None
-                        results.append((e, rotation,
-                                        autocrop.align_to_content(doc, rotation, size, near)))
+                        found = autocrop.align_to_content(doc, rotation, size, near)
+                        if found is None:
+                            failed.append(os.path.basename(path) + " (kein Scanrahmen)")
+                        else:
+                            results.append((e, rotation, found))
                 except Exception as exc:
                     failed.append(f"{os.path.basename(path)} ({exc})")
                 sig.progress.emit(i + 1, len(jobs))
