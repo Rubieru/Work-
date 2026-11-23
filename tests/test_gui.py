@@ -322,6 +322,7 @@ def test_crop_workflow_carry_frame_and_batch_with_own_crops(app, tmp_path, monke
     win.tabs.setCurrentIndex(0)
     wait(app)
 
+    win.chk_auto_align.setChecked(False)   # hier: Rahmen genau übernehmen
     # Bild 1: Rahmen setzen und Größe festhalten
     win._set_crop((40, 30, 400, 300))
     win.chk_lock_size.setChecked(True)
@@ -462,4 +463,35 @@ def test_preset_to_all_and_batch_with_own_presets(app, tmp_path, monkeypatch):
         loaded = P.load_image(str(o))
         a = loaded.data.astype(float) * (255.0 / (65535.0 if loaded.bits == 16 else 255.0))
         assert np.percentile(a, 0.5) < 25 and np.percentile(a, 99.5) > 230, o.name
+    win.close()
+
+
+def test_auto_crop_all_sheets_then_batch(app, tmp_path, monkeypatch):
+    from luftbild_editor import batch as B
+    from luftbild_editor.main_window import MainWindow
+    from tests.test_autocrop import archive_photo
+    monkeypatch.setattr("PySide6.QtCore.QStandardPaths.writableLocation",
+                        lambda *_: str(tmp_path / "cfg"))
+    files = []
+    for i, ang in enumerate((5, -9)):
+        f = tmp_path / f"archiv{i}.tif"
+        P.save_image(str(f), P.to_uint(archive_photo(ang, seed=i, size=(1000, 750))[0], 8),
+                     "tif8")
+        files.append(str(f))
+    win = MainWindow()
+    win.show()
+    win.add_files(files)
+    wait(app)
+    win.auto_crop_all("sheet")
+    wait(app)
+    for _ in range(10):
+        app.processEvents()
+    assert all(e.settings.crop and abs(e.settings.rotation) > 3 for e in win.entries)
+    monkeypatch.setattr(B.BatchDialog, "exec", lambda self: B.BatchDialog.Accepted)
+    monkeypatch.setattr("luftbild_editor.main_window.QMessageBox.information", lambda *a: None)
+    win.batch()
+    wait(app)
+    for o in (tmp_path / "bearbeitet").iterdir():
+        a = P.as_float(P.load_image(str(o)).data)
+        assert (a > 0.6).mean() > 0.7, o.name
     win.close()

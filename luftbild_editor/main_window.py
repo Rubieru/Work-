@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication
                                QWidget)
 
 from . import __version__
+from . import autocrop
 from . import processing as P
 from . import theme
 from .presets import (BUILTIN_PRESETS, PRESET_INFO, auto_variant, load_user_presets,
@@ -350,6 +351,44 @@ class MainWindow(QMainWindow):
         self.chk_lock_size.toggled.connect(self._on_lock_size)
         l0.addWidget(self.chk_lock_size)
         lay.addWidget(g0)
+
+        ga = QGroupBox("Automatisch zuschneiden")
+        la = QVBoxLayout(ga)
+        row = QHBoxLayout()
+        b = QPushButton("Rahmen an Bildinhalt ausrichten")
+        b.setToolTip(
+            "Luftbilder: erkennt den schwarzen Scanrahmen mit Messmarken und Beschriftung "
+            "und legt den Rahmen in den Bildinhalt.\n"
+            "Mit „Größe festhalten“ bleibt die Rahmengröße gleich und nur die Lage wird "
+            "angepasst, sonst wird der größte Rahmen ohne schwarzen Rand gewählt.")
+        b.clicked.connect(self.auto_align_frame)
+        row.addWidget(b)
+        b = QPushButton("Bei allen")
+        b.setToolTip("Rahmen bei allen Bildern der Liste an den Bildinhalt ausrichten.")
+        b.clicked.connect(lambda: self.auto_crop_all("align"))
+        row.addWidget(b)
+        la.addLayout(row)
+        self.chk_auto_align = QCheckBox("Beim Bildwechsel automatisch ausrichten")
+        self.chk_auto_align.setToolTip(
+            "Mit „Größe festhalten“: der übernommene Rahmen wird beim Wechsel zum nächsten "
+            "Bild gleich an dessen schwarzen Rand angelegt – nur noch fein nachschieben.")
+        self.chk_auto_align.setChecked(QSettings().value("auto_align", True, type=bool))
+        self.chk_auto_align.toggled.connect(lambda v: QSettings().setValue("auto_align", v))
+        la.addWidget(self.chk_auto_align)
+        row = QHBoxLayout()
+        b = QPushButton("Blatt erkennen (Archivalien)")
+        b.setToolTip(
+            "Fotos aus dem Archiv: findet das Blatt Papier, dreht es gerade und schneidet "
+            "Tisch, Hände, Stifte usw. weg. Nicht pixelgenau – danach bei Bedarf "
+            "nachschieben.")
+        b.clicked.connect(self.auto_detect_sheet)
+        row.addWidget(b)
+        b = QPushButton("Bei allen")
+        b.setToolTip("Blatt bei allen Bildern der Liste erkennen und zuschneiden.")
+        b.clicked.connect(lambda: self.auto_crop_all("sheet"))
+        row.addWidget(b)
+        la.addLayout(row)
+        lay.addWidget(ga)
 
         g = QGroupBox("Ausschnitt (Pixel)")
         form = QFormLayout(g)
@@ -796,7 +835,7 @@ class MainWindow(QMainWindow):
             base = kind[6:]
             if base in self._busy:
                 self._busy[base] = False
-            if base in ("load", "export", "batch"):
+            if base in ("load", "export", "batch", "autocrop"):
                 self._t_loading.stop()
                 self._close_progress()
                 self.statusBar().clearMessage()
@@ -818,7 +857,8 @@ class MainWindow(QMainWindow):
 
     def _show_error(self, kind, exc):
         names = {"load": "Laden", "export": "Speichern", "batch": "Stapelverarbeitung",
-                 "preview": "Vorschau", "detail": "Detailansicht", "thumbs": "Vorschaubilder"}
+                 "preview": "Vorschau", "detail": "Detailansicht", "thumbs": "Vorschaubilder",
+                 "autocrop": "Automatisch zuschneiden"}
         text = f"Fehler bei {names.get(kind, kind)}: {type(exc).__name__}: {exc}"
         self.statusBar().showMessage(text, 30000)
         if kind not in self._errors_shown:  # jede Fehlerart nur einmal als Fenster
@@ -866,14 +906,132 @@ class MainWindow(QMainWindow):
         x, y, cw, ch = self._last_crop
         cw, ch = min(cw, w), min(ch, h)
         crop = (min(max(0, x), w - cw), min(max(0, y), h - ch), cw, ch)
+        aligned = False
+        if self.chk_auto_align.isChecked():
+            try:
+                crop = autocrop.align_to_content(
+                    self.doc, self.entry.settings.rotation, (cw, ch),
+                    near=(crop[0] + cw // 2, crop[1] + ch // 2))
+                aligned = True
+            except Exception:  # Erkennung ist nur eine Hilfe
+                log.exception("Automatisches Ausrichten fehlgeschlagen")
         s = replace(self.entry.settings, crop=crop)
         self.entry.settings = s
         self.entry.history = [s]
         self.entry.hist_idx = 0
         self._update_list_item(self.entry)
         self.statusBar().showMessage(
-            f"Rahmen {cw} × {ch} px vom vorigen Bild übernommen – jetzt an die richtige "
-            "Stelle schieben.", 10000)
+            f"Rahmen {cw} × {ch} px vom vorigen Bild übernommen"
+            + (" und am schwarzen Rand ausgerichtet – nur noch fein nachschieben."
+               if aligned else " – jetzt an die richtige Stelle schieben."), 10000)
+
+    # ---- automatischer Zuschnitt
+    def auto_align_frame(self):
+        if not self.doc:
+            return
+        s = self.entry.settings
+        size = None
+        if self.chk_lock_size.isChecked() and s.crop:
+            size = tuple(s.crop[2:])
+        elif self.chk_lock_size.isChecked() and self._last_crop:
+            size = tuple(self._last_crop[2:])
+        near = (s.crop[0] + s.crop[2] // 2, s.crop[1] + s.crop[3] // 2) if s.crop else None
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            crop = autocrop.align_to_content(self.doc, s.rotation, size, near)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._set_crop(crop)
+        self.statusBar().showMessage(
+            f"Rahmen {crop[2]} × {crop[3]} px an den Bildinhalt gelegt – bei Bedarf fein "
+            "nachschieben.", 8000)
+
+    def auto_detect_sheet(self):
+        if not self.doc:
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            found = autocrop.detect_sheet(self.doc)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if found is None:
+            QMessageBox.information(
+                self, "Kein Blatt erkannt",
+                "Es wurde kein Blatt sicher erkannt (z. B. weil Blatt und Untergrund gleich "
+                "hell sind). Bitte den Rahmen von Hand setzen.")
+            return
+        rotation, crop = found
+        self._set_settings(replace(self.entry.settings, rotation=rotation, crop=crop))
+        self.sl_rotation.setValue(rotation)
+        self._sync_crop_controls()
+        self.statusBar().showMessage(
+            f"Blatt erkannt: gedreht um {rotation:.1f}°, Ausschnitt {crop[2]} × {crop[3]} px.",
+            8000)
+
+    def auto_crop_all(self, mode):
+        """Alle Bilder der Liste automatisch zuschneiden (im Hintergrund)."""
+        if not self.entries:
+            return
+        lock = self.chk_lock_size.isChecked()
+        cur = self.entry.settings.crop if self.entry else None
+        size = tuple(cur[2:]) if (lock and cur) else None
+        jobs = [(e, e.path, e.settings.rotation, e.settings.crop) for e in self.entries]
+        current_doc, current_entry = self.doc, self.entry
+        self._start_progress(f"{len(jobs)} Bilder werden automatisch zugeschnitten …",
+                             cancel=True)
+        sig = self.sig
+        self._batch_cancel = False
+
+        def job():
+            results, failed = [], []
+            for i, (e, path, rotation, crop) in enumerate(jobs):
+                if self._batch_cancel:
+                    break
+                try:
+                    doc = current_doc if e is current_entry and current_doc else \
+                        P.Document.open(path)
+                    if mode == "sheet":
+                        found = autocrop.detect_sheet(doc)
+                        if found is None:
+                            failed.append(os.path.basename(path))
+                        else:
+                            results.append((e, found[0], found[1]))
+                    else:
+                        near = (crop[0] + crop[2] // 2, crop[1] + crop[3] // 2) if crop \
+                            else None
+                        results.append((e, rotation,
+                                        autocrop.align_to_content(doc, rotation, size, near)))
+                except Exception as exc:
+                    failed.append(f"{os.path.basename(path)} ({exc})")
+                sig.progress.emit(i + 1, len(jobs))
+            return results, failed
+
+        self._submit("autocrop", job)
+
+    def _done_autocrop(self, res):
+        results, failed = res
+        self._close_progress()
+        for e, rotation, crop in results:
+            if e not in self.entries:
+                continue
+            s = replace(e.settings, rotation=rotation, crop=crop)
+            if e is self.entry:
+                self._set_settings(s)
+                self.sl_rotation.setValue(rotation)
+                self._sync_crop_controls()
+            else:
+                e.settings = s
+                del e.history[e.hist_idx + 1:]
+                e.history.append(s)
+                e.hist_idx = len(e.history) - 1
+            self._update_list_item(e)
+        text = f"{len(results)} Bilder automatisch zugeschnitten (✂ in der Liste)."
+        if failed:
+            text += "\n\nNicht erkannt – bitte von Hand zuschneiden:\n" + "\n".join(
+                "• " + f for f in failed[:15])
+            QMessageBox.warning(self, "Automatisch zuschneiden", text)
+        else:
+            self.statusBar().showMessage(text + " Bitte kurz durchsehen.", 10000)
 
     # ================================================================ Rendern
     def _effective(self) -> P.Settings:
