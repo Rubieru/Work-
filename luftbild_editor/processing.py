@@ -129,12 +129,23 @@ class LoadedImage:
     bits: int          # 8 oder 16 (Herkunft)
     dpi: float | None
     geo: object = None  # geo.Geo, falls georeferenziert
+    color: np.ndarray | None = None  # (H, W, 3) RGB im selben Format wie data, falls farbig
 
 
-def _to_gray(arr: np.ndarray, rgb_order: bool) -> tuple[np.ndarray, int]:
+def _is_gray(rgb: np.ndarray) -> bool:
+    """True, wenn ein RGB-Bild in Wahrheit grau ist (alle Kanäle praktisch gleich)."""
+    step = max(1, int(np.sqrt(rgb.shape[0] * rgb.shape[1] / 250_000)))
+    s = rgb[::step, ::step].astype(np.float32) / _norm_of(rgb)
+    diff = np.maximum(np.abs(s[..., 0] - s[..., 1]), np.abs(s[..., 1] - s[..., 2]))
+    return float(np.percentile(diff, 99.5)) < 3 / 255
+
+
+def _to_gray(arr: np.ndarray, rgb_order: bool, keep_color: list | None = None
+             ) -> tuple[np.ndarray, int]:
     """Graustufen im Originalformat (uint8/uint16) – spart gegenüber float32 3/4 Speicher.
 
-    Andere Formate werden als float32 im Bereich 0..1 geliefert.
+    Andere Formate werden als float32 im Bereich 0..1 geliefert. Ist das Bild farbig,
+    wird die Farbe (RGB, gleiches Format) in keep_color[0] abgelegt.
     """
     arr = np.asarray(arr)
     # Mehrseitige TIFFs: erste Seite
@@ -146,10 +157,13 @@ def _to_gray(arr: np.ndarray, rgb_order: bool) -> tuple[np.ndarray, int]:
         else:
             if arr.shape[2] == 4:
                 arr = arr[:, :, :3]
-            code = cv2.COLOR_RGB2GRAY if rgb_order else cv2.COLOR_BGR2GRAY
             if arr.dtype not in (np.uint8, np.uint16, np.float32):
                 arr = arr.astype(np.float32)
-            arr = cv2.cvtColor(np.ascontiguousarray(arr), code)
+            arr = np.ascontiguousarray(arr)
+            rgb = arr if rgb_order else cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+            if keep_color is not None and not _is_gray(rgb):
+                keep_color.append(rgb)
+            arr = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     if arr.dtype == np.uint8:
         return np.ascontiguousarray(arr), 8
     if arr.dtype == np.uint16:
@@ -220,13 +234,15 @@ def load_image(path: str) -> LoadedImage:
                     geo = read_geo(path, page)
                 except Exception:
                     geo = None
-            data, bits = _to_gray(arr, rgb_order=True)
+            color = []
+            data, bits = _to_gray(arr, rgb_order=True, keep_color=color)
             if photometric == 0:  # MINISWHITE: 0 = weiß
                 data = (_norm_of(data) - data).astype(data.dtype)
             data = np.ascontiguousarray(data)
-            log.info("Gelesen in %.1f s (Entpacken %.1f s, Umwandeln %.1f s)",
-                     time.perf_counter() - t0, t1 - t0, time.perf_counter() - t1)
-            return LoadedImage(data, bits, dpi, geo)
+            log.info("Gelesen in %.1f s (Entpacken %.1f s, Umwandeln %.1f s)%s",
+                     time.perf_counter() - t0, t1 - t0, time.perf_counter() - t1,
+                     ", Farbbild" if color else "")
+            return LoadedImage(data, bits, dpi, geo, _color_like(color, data))
         except Exception:
             log.exception("tifffile konnte %s nicht lesen – versuche OpenCV", path)
     # np.fromfile + imdecode funktioniert auch mit Umlauten im Pfad (Windows)
@@ -236,11 +252,27 @@ def load_image(path: str) -> LoadedImage:
     if arr is None:
         raise ValueError(f"Bild konnte nicht gelesen werden: {path}")
     t2 = time.perf_counter()
-    data, bits = _to_gray(arr, rgb_order=False)
+    color = []
+    data, bits = _to_gray(arr, rgb_order=False, keep_color=color)
     log.info("Gelesen mit OpenCV (%s, %.0f MB, %s %s): Datei %.1f s, Entpacken %.1f s, "
              "Umwandeln %.1f s", ext, size_mb, arr.shape, arr.dtype, t1 - t0, t2 - t1,
              time.perf_counter() - t2)
-    return LoadedImage(np.ascontiguousarray(data), bits, None, read_geo(path))
+    return LoadedImage(np.ascontiguousarray(data), bits, None, read_geo(path),
+                       _color_like(color, data))
+
+
+def _color_like(color: list, gray: np.ndarray) -> np.ndarray | None:
+    """Farbe im selben Zahlenformat wie das Graubild (uint8/uint16/float32 0..1)."""
+    if not color:
+        return None
+    c = color[0]
+    if c.dtype == gray.dtype:
+        return np.ascontiguousarray(c)
+    c = as_float(c) if c.dtype in (np.uint8, np.uint16) else c.astype(np.float32)
+    if gray.dtype == np.float32:
+        hi = float(c.max(initial=1.0))
+        return np.ascontiguousarray(np.clip(c / (hi if hi > 1 else 1.0), 0, 1))
+    return to_uint(c, 16 if gray.dtype == np.uint16 else 8)
 
 
 EXPORT_FORMATS = {
@@ -266,7 +298,8 @@ def to_uint(img: np.ndarray, bits: int, nodata_safe: bool = False) -> np.ndarray
 def save_image(path: str, arr: np.ndarray, fmt: str, dpi: float | None = None,
                geo=None, geo_affine=None) -> None:
     if fmt in ("tif16", "tif8") and tifffile is not None:
-        kwargs = {"photometric": "minisblack", "compression": "zlib"}
+        kwargs = {"photometric": "rgb" if arr.ndim == 3 else "minisblack",
+                  "compression": "zlib"}
         if dpi:
             kwargs["resolution"] = (float(dpi), float(dpi))
             kwargs["resolutionunit"] = "INCH"
@@ -286,6 +319,8 @@ def save_image(path: str, arr: np.ndarray, fmt: str, dpi: float | None = None,
     params = []
     if fmt == "jpg":
         params = [cv2.IMWRITE_JPEG_QUALITY, 95]
+    if arr.ndim == 3:
+        arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
     ok, enc = cv2.imencode(ext, arr, params)
     if not ok:
         raise IOError(f"Bild konnte nicht gespeichert werden: {path}")
@@ -299,7 +334,7 @@ def save_image(path: str, arr: np.ndarray, fmt: str, dpi: float | None = None,
 # --------------------------------------------------------------------------
 
 def _resize_long(img: np.ndarray, long_side: int) -> tuple[np.ndarray, float]:
-    h, w = img.shape
+    h, w = img.shape[:2]
     s = long_side / max(h, w)
     if s >= 1.0:
         return img, 1.0
@@ -315,8 +350,8 @@ def rotate_image(img: np.ndarray, angle: float) -> np.ndarray:
         return img
     k = quarter_turns(angle)
     if k is not None:
-        return np.ascontiguousarray(np.rot90(img, -k))
-    h, w = img.shape
+        return np.ascontiguousarray(np.rot90(img, -k, axes=(0, 1)))
+    h, w = img.shape[:2]
     nw, nh = rotated_size(w, h, angle)
     return cv2.warpAffine(img, rotation_matrix(w, h, angle), (nw, nh), flags=cv2.INTER_CUBIC,
                           borderMode=cv2.BORDER_CONSTANT, borderValue=0)
@@ -363,6 +398,7 @@ class Prepared:
     small_scale: float
     stats: np.ndarray           # ~2048 px Stichprobe für Histogramm
     long_side: int
+    color_levels: list | None = None   # wie levels, aber RGB (nur bei Farbbildern)
 
     @property
     def size(self) -> tuple[int, int]:
@@ -388,6 +424,7 @@ class Prepared:
 class Document:
     def __init__(self, loaded: LoadedImage, path: str | None = None):
         self.raw = loaded.data
+        self.color = loaded.color      # (H, W, 3) RGB oder None (Graubild)
         self.bits = loaded.bits
         self.dpi = loaded.dpi
         self.geo = loaded.geo
@@ -395,6 +432,7 @@ class Document:
         self._lock = threading.Lock()
         self._rot_key = None
         self._rotated = None
+        self._rot_color = (None, None)
         self._prep_key = None
         self._prep = None
 
@@ -419,6 +457,19 @@ class Document:
                 self._rotated = rotate_image(self.raw, angle)
                 self._rot_key = key
             return self._rotated
+
+    @property
+    def is_color(self) -> bool:
+        return self.color is not None
+
+    def rotated_color(self, angle: float) -> np.ndarray | None:
+        if self.color is None:
+            return None
+        with self._lock:
+            key = round(angle, 4)
+            if self._rot_color[0] != key:
+                self._rot_color = (key, rotate_image(self.color, angle))
+            return self._rot_color[1]
 
     def canvas_size(self, angle: float) -> tuple[int, int]:
         """Größe des gedrehten Bildes (darauf beziehen sich die Zuschnitt-Koordinaten)."""
@@ -445,8 +496,19 @@ class Document:
             levels.append((mid_scale, mid))
         levels.append((1.0, base))
         stats = mid
+        color_levels = None
+        rc = self.rotated_color(s.rotation)
+        if rc is not None:
+            cbase = rc[y:y + ch, x:x + cw]
+            color_levels = []
+            for lscale, arr in levels:
+                if lscale >= 1.0:
+                    color_levels.append((1.0, cbase))
+                else:
+                    color_levels.append((lscale, as_float(cv2.resize(
+                        cbase, (arr.shape[1], arr.shape[0]), interpolation=cv2.INTER_AREA))))
         prep = Prepared(base=base, levels=levels, small=small, small_scale=small_scale,
-                        stats=stats, long_side=max(base.shape))
+                        stats=stats, long_side=max(base.shape), color_levels=color_levels)
         with self._lock:
             self._prep_key, self._prep = key, prep
         return prep
@@ -989,11 +1051,27 @@ def soft_clip(img: np.ndarray, knee: float = SOFT_KNEE) -> np.ndarray:
     return out
 
 
+def colorize(out: np.ndarray, gray_in: np.ndarray, color_in: np.ndarray) -> np.ndarray:
+    """Farbe nach der Bearbeitung der Helligkeit wieder anbringen.
+
+    Jeder Farbkanal wird im selben Verhältnis geändert wie die Helligkeit (out / gray_in):
+    Farbton und Sättigung bleiben, Kontrast, Streckung und Schärfe wirken wie im Graubild.
+    In fast schwarzen Bereichen (unsicheres Verhältnis) geht die Farbe sanft in Grau über.
+    """
+    g = np.maximum(gray_in, 1e-3)
+    ratio = np.minimum(out / g, 8.0)[..., None]
+    col = color_in * ratio
+    w = np.clip(gray_in / 0.02, 0.0, 1.0)[..., None]
+    col = col * w + out[..., None] * (1.0 - w)
+    return np.clip(col, 0.0, 1.0).astype(np.float32)
+
+
 def render(prep: Prepared, s: Settings, region=None, scale: float = 1.0,
-           glob: Globals | None = None) -> np.ndarray:
+           glob: Globals | None = None, color: bool = False) -> np.ndarray:
     """Berechnet einen Ausschnitt (x, y, w, h in Basispixeln) in der Größe scale.
 
-    Die Ausgabe hat round(w*scale) x round(h*scale) Pixel.
+    Die Ausgabe hat round(w*scale) x round(h*scale) Pixel; mit color=True bei Farbbildern
+    zusätzlich drei Kanäle (RGB).
     """
     W, H = prep.size
     x, y, w, h = region if region is not None else (0, 0, W, H)
@@ -1002,11 +1080,13 @@ def render(prep: Prepared, s: Settings, region=None, scale: float = 1.0,
         glob = compute_globals(prep, s)
 
     # kleinste Auflösungsstufe wählen, die nicht hochskaliert werden muss
-    ls, src = prep.levels[-1]
-    for lscale, arr in prep.levels:
+    li = len(prep.levels) - 1
+    for i, (lscale, _) in enumerate(prep.levels):
         if lscale >= scale - 1e-9:
-            ls, src = lscale, arr
+            li = i
             break
+    ls, src = prep.levels[li]
+    use_color = color and prep.color_levels is not None
 
     pad = filter_margin(prep, s)
     sh, sw = src.shape
@@ -1015,25 +1095,33 @@ def render(prep: Prepared, s: Settings, region=None, scale: float = 1.0,
     x1l = min(sw, int(math.ceil((x + w + pad) * ls)))
     y1l = min(sh, int(math.ceil((y + h + pad) * ls)))
     tile = as_float(src[y0l:y1l, x0l:x1l])
+    ctile = as_float(prep.color_levels[li][1][y0l:y1l, x0l:x1l]) if use_color else None
 
     f = scale / ls
     if f < 0.999:
         tw = max(1, round(tile.shape[1] * f))
         th = max(1, round(tile.shape[0] * f))
         tile = cv2.resize(tile, (tw, th), interpolation=cv2.INTER_AREA)
+        if use_color:
+            ctile = cv2.resize(ctile, (tw, th), interpolation=cv2.INTER_AREA)
         fx = tw / (x1l - x0l)
     else:
         fx = 1.0
     eff = ls * fx  # Ausgabepixel pro Basispixel
 
     out = apply_tonal(tile, prep, s, glob, x0l / ls, y0l / ls, eff)
+    if use_color:
+        if s.invert:
+            out = colorize(out, 1.0 - tile, 1.0 - ctile)
+        else:
+            out = colorize(out, tile, ctile)
 
     cx = int(round((x * ls - x0l) * fx))
     cy = int(round((y * ls - y0l) * fx))
     cw = max(1, int(round(w * scale)))
     ch = max(1, int(round(h * scale)))
     out = out[cy:cy + ch, cx:cx + cw]
-    if out.shape != (ch, cw):  # Rundungsdifferenz am Rand ausgleichen
+    if out.shape[:2] != (ch, cw):  # Rundungsdifferenz am Rand ausgleichen
         out = cv2.copyMakeBorder(out, 0, max(0, ch - out.shape[0]), 0,
                                  max(0, cw - out.shape[1]), cv2.BORDER_REPLICATE)[:ch, :cw]
     return out
@@ -1045,12 +1133,13 @@ def render_full(doc: Document, s: Settings, bits: int = 16, tile: int = 2048,
     prep = doc.prepare(s)
     glob = compute_globals(prep, s)
     W, H = prep.size
-    out = np.empty((H, W), dtype=np.uint16 if bits == 16 else np.uint8)
+    shape = (H, W, 3) if prep.color_levels is not None else (H, W)
+    out = np.empty(shape, dtype=np.uint16 if bits == 16 else np.uint8)
     tiles = [(x, y) for y in range(0, H, tile) for x in range(0, W, tile)]
     for i, (x, y) in enumerate(tiles):
         w, h = min(tile, W - x), min(tile, H - y)
-        out[y:y + h, x:x + w] = to_uint(render(prep, s, (x, y, w, h), 1.0, glob), bits,
-                                        nodata_safe)
+        out[y:y + h, x:x + w] = to_uint(render(prep, s, (x, y, w, h), 1.0, glob, color=True),
+                                        bits, nodata_safe)
         if progress:
             progress(i + 1, len(tiles))
     return out

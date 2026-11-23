@@ -40,9 +40,20 @@ IMAGE_FILTER = "Bilder (*.tif *.tiff *.png *.jpg *.jpeg *.bmp *.jp2);;Alle Datei
 
 
 def gray_qimage(arr8: np.ndarray) -> QImage:
+    """8-Bit-Bild -> QImage: 2D als Graustufen, (H, W, 3) als RGB."""
     arr8 = np.ascontiguousarray(arr8)
+    if arr8.ndim == 3:
+        h, w = arr8.shape[:2]
+        return QImage(arr8.data, w, h, 3 * w, QImage.Format_RGB888).copy()
     h, w = arr8.shape
     return QImage(arr8.data, w, h, w, QImage.Format_Grayscale8).copy()
+
+
+def luminance(img: np.ndarray) -> np.ndarray:
+    """Helligkeit eines Farbbildes (für Histogramme); Graubilder unverändert."""
+    if img.ndim == 3:
+        return cv2.cvtColor(np.ascontiguousarray(img, dtype=np.float32), cv2.COLOR_RGB2GRAY)
+    return img
 
 
 @dataclass
@@ -750,6 +761,9 @@ class MainWindow(QMainWindow):
             disp = P.as_float(disp)
             lo, hi = np.percentile(disp[::2, ::2], [0.2, 99.8])
             levels = (float(lo), float(max(hi, lo + 1e-4)))
+            if doc.is_color:
+                disp = P.as_float(cv2.resize(doc.color, (disp.shape[1], disp.shape[0]),
+                                             interpolation=cv2.INTER_AREA))
             qimg = gray_qimage(P.to_uint((disp - levels[0]) / (levels[1] - levels[0]), 8))
             log.info("Geladen %s: %d x %d px, %d Bit, Lesen %.1f s, Ansicht %.1f s",
                      path, *doc.size, doc.bits, t1 - t0, time.time() - t1)
@@ -1056,7 +1070,9 @@ class MainWindow(QMainWindow):
             t1 = time.time()
             glob = P.compute_globals(prep, s)
             scale = min(1.0, PREVIEW_LONG_SIDE / prep.long_side)
-            img = P.render(prep, s, None, scale, glob)
+            img = P.render(prep, s, None, scale, glob, color=True)
+            shown = img
+            img = luminance(img)
             if t1 - t0 > 0.5:
                 log.info("Vorschau: Vorbereiten %.1f s, Berechnen %.1f s", t1 - t0,
                          time.time() - t1)
@@ -1068,7 +1084,7 @@ class MainWindow(QMainWindow):
                 after = P.histogram(img[vm])
             else:
                 after = P.histogram(img)
-            return dict(qimg=gray_qimage(P.to_uint(img, 8)), size=prep.size, scale=scale,
+            return dict(qimg=gray_qimage(P.to_uint(shown, 8)), size=prep.size, scale=scale,
                         before=before, after=after, levels=glob.levels)
 
         self._submit("preview", job)
@@ -1112,7 +1128,7 @@ class MainWindow(QMainWindow):
         def job():
             prep = doc.prepare(s)
             glob = P.compute_globals(prep, s)
-            img = P.render(prep, s, (x, y, w, h), scale, glob)
+            img = P.render(prep, s, (x, y, w, h), scale, glob, color=True)
             return dict(qimg=gray_qimage(P.to_uint(img, 8)), x=x, y=y,
                         scale=img.shape[1] / w, geometry=(s.rotation, s.crop))
 
@@ -1137,7 +1153,8 @@ class MainWindow(QMainWindow):
         if x1 <= x or y1 <= y:
             return
         scale = min(1.0, z)
-        raw, (lo, hi) = self.doc.raw, self._crop_levels
+        raw, (lo, hi) = (self.doc.color if self.doc.is_color else self.doc.raw), \
+            self._crop_levels
 
         def job():
             tile = P.as_float(raw[y:y1, x:x1])
@@ -1186,7 +1203,8 @@ class MainWindow(QMainWindow):
                 if variant:
                     values = auto[variant] = P.auto_tonal(prep, variant)
                 s = P.with_tonal(geo, values)
-                out[name] = gray_qimage(P.to_uint(P.render(prep, s, None, scale), 8))
+                out[name] = gray_qimage(P.to_uint(
+                    P.render(prep, s, None, scale, color=True), 8))
             log.info("Vorschaukacheln und Automatik in %.1f s", time.time() - t0)
             return dict(thumbs=out, auto=auto, geometry=(geo.rotation, geo.crop))
 

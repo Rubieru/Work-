@@ -82,6 +82,67 @@ def align_to_content(doc: P.Document, rotation: float, size: tuple[int, int] | N
     return min(max(0, x), W - cw), min(max(0, y), H - ch), cw, ch
 
 
+def text_mask(small: np.ndarray) -> np.ndarray:
+    """Schrift finden (ohne Texterkennung): feine, dunkle Striche auf hellerem Grund.
+
+    Black-Hat hebt dunkle Details hervor, die schmaler als das Strukturelement sind.
+    Danach bleiben nur Flecken in Schriftgröße übrig – große dunkle Flächen (Tisch,
+    Hände, Schatten) und einzelne Staubpunkte fallen weg.
+    """
+    h, w = small.shape
+    L = max(h, w)
+    u8 = np.clip(small * 255, 0, 255).astype(np.uint8)
+    k = max(9, int(L / 60) | 1)
+    bh = cv2.morphologyEx(u8, cv2.MORPH_BLACKHAT,
+                          cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
+    thr = max(20.0, float(np.percentile(bh, 99)) * 0.35)
+    m = (bh > thr).astype(np.uint8)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
+    keep = np.zeros(n, bool)
+    if n > 1:
+        bw, bhh, area = st[1:, 2], st[1:, 3], st[1:, 4]
+        size = np.maximum(bw, bhh)
+        ok = (size >= max(2, L * 0.002)) & (size <= L * 0.06) & (area >= 3) \
+            & (area <= 0.9 * bw * bhh)
+        keep[1:] = ok
+    return keep[lab]
+
+
+def _text_box(tm: np.ndarray):
+    """Bereich mit Schrift (robust gegen einzelne Fehlstellen) oder None."""
+    ys, xs = np.nonzero(tm)
+    if xs.size < max(200, tm.size * 0.0005):
+        return None
+    x0, x1 = np.percentile(xs, [0.5, 99.5])
+    y0, y1 = np.percentile(ys, [0.5, 99.5])
+    return float(x0), float(y0), float(x1), float(y1), xs, ys
+
+
+def _paper_mask(doc: P.Document, small: np.ndarray, tmask: np.ndarray, text):
+    """Maske der Pixel in Papierfarbe (Lab bei Farbbildern, sonst Helligkeit)."""
+    h, w = small.shape
+    x0, y0, x1, y1 = (int(v) for v in text[:4])
+    if doc.is_color:
+        col = P.as_float(cv2.resize(doc.color, (w, h), interpolation=cv2.INTER_AREA))
+        feat = cv2.cvtColor(np.ascontiguousarray(col, dtype=np.float32), cv2.COLOR_RGB2Lab)
+        feat = cv2.GaussianBlur(feat, (0, 0), max(1.0, max(h, w) / 400))
+    else:
+        feat = cv2.GaussianBlur(small, (0, 0), max(1.0, max(h, w) / 400))[..., None] * 100
+    # Papier = Umgebung der Schrift ohne die Schrift selbst
+    near = np.zeros((h, w), np.uint8)
+    near[y0:y1 + 1, x0:x1 + 1] = 1
+    k = max(3, int(max(h, w) / 150) | 1)
+    near &= cv2.dilate(tmask.astype(np.uint8), np.ones((k, k), np.uint8)) == 0
+    sample = feat[near.astype(bool)]
+    if sample.shape[0] < 200:
+        return None
+    med = np.median(sample, axis=0)
+    dist = np.sqrt(((feat - med) ** 2).sum(axis=2))
+    # typische Abweichung (Median) – robust gegen Schriftreste am Rand der Stichprobe
+    spread = np.median(np.sqrt(((sample - med) ** 2).sum(axis=1)))
+    return ((dist < max(6.0, 4.0 * spread)) * 255).astype(np.uint8)
+
+
 def detect_sheet(doc: P.Document, margin: float = 0.01):
     """Blatt Papier (Archivale) im Foto finden.
 
@@ -114,6 +175,15 @@ def detect_sheet(doc: P.Document, margin: float = 0.01):
     cv2.drawContours(filled, cnts, -1, 255, -1)
     candidates.append(filled)
 
+    # 3) Papierfarbe: rund um die Schrift gemessen; zum Blatt gehört, was diese Farbe hat
+    #    (trennt Papier von Händen und Tisch, auch wenn sie gleich hell sind)
+    tmask = text_mask(small)
+    text = _text_box(tmask)
+    if text is not None:
+        paper = _paper_mask(doc, small, tmask, text)
+        if paper is not None:
+            candidates.append(paper)
+
     k = max(5, int(max(h, w) * 0.02) | 1)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
     found = []
@@ -133,13 +203,26 @@ def detect_sheet(doc: P.Document, margin: float = 0.01):
             fill = area / (rw * rh)
             if fill > 0.6:
                 found.append((area, fill, rect))
-    if not found:
-        return None
-    # unter den ausreichend großen Flächen die rechteckigste: eine Hand am Blattrand macht
-    # die Fläche größer, aber weniger rechteckig
-    biggest = max(a for a, _, _ in found)
-    best = max((f, a, r) for a, f, r in found if a >= 0.5 * biggest)
-    best = (None, best[2])
+    # Schrift gibt es nur auf dem Dokument: der Blatt-Rahmen muss sie enthalten
+    if text is not None:
+        xs, ys = text[4], text[5]
+        step = max(1, xs.size // 3000)
+        pts = [(float(x), float(y)) for x, y in zip(xs[::step], ys[::step])]
+
+        def holds_text(rect):
+            box = cv2.boxPoints(rect).astype(np.float32)
+            return np.mean([cv2.pointPolygonTest(box, p, False) >= 0 for p in pts]) >= 0.9
+        found = [f for f in found if holds_text(f[2])]
+    best = None
+    if found:
+        # unter den ausreichend großen Flächen die rechteckigste: eine Hand am Blattrand
+        # macht die Fläche größer, aber weniger rechteckig
+        biggest = max(a for a, _, _ in found)
+        best = (None, max((f, a, r) for a, f, r in found if a >= 0.5 * biggest)[2])
+    if best is None:
+        if text is None:
+            return None
+        return _crop_from_text(doc, text, f0, w, h)
     (cx, cy), (rw, rh), angle = best[1]
     # Winkel so wählen, dass die Drehung höchstens ±45° beträgt
     if angle > 45:
@@ -161,3 +244,17 @@ def detect_sheet(doc: P.Document, margin: float = 0.01):
     dx, dy = (x1 - x0) * margin, (y1 - y0) * margin
     crop = (round(x0 + dx), round(y0 + dy), round(x1 - x0 - 2 * dx), round(y1 - y0 - 2 * dy))
     return rotation, P.clamp_crop(crop, *rotated_size(W, H, rotation))
+
+
+def _crop_from_text(doc: P.Document, text, f0: float, w: int, h: int):
+    """Zuschnitt um die Schrift herum. Füllt sie fast das ganze Foto (Blatt ohne
+    sichtbaren Rand), bleibt das ganze Bild stehen."""
+    x0, y0, x1, y1 = text[:4]
+    pad_x, pad_y = 0.05 * w, 0.05 * h
+    x0, y0 = max(0.0, x0 - pad_x), max(0.0, y0 - pad_y)
+    x1, y1 = min(float(w), x1 + pad_x), min(float(h), y1 + pad_y)
+    W, H = doc.size
+    if (x1 - x0) * (y1 - y0) >= 0.8 * w * h:
+        return 0.0, (0, 0, W, H)
+    crop = (round(x0 * f0), round(y0 * f0), round((x1 - x0) * f0), round((y1 - y0) * f0))
+    return 0.0, P.clamp_crop(crop, W, H)

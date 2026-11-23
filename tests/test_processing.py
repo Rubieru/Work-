@@ -287,3 +287,53 @@ def test_bachelor_script_levels_match_script():
     np.testing.assert_allclose(mid, np.clip((center - lo) / (hi - lo), 0, 1), atol=0.005)
     s = P.with_tonal(P.Settings(), v)
     assert P.settings_from_json(P.settings_to_json(s)) == s
+
+
+def color_photo(w=600, h=400):
+    """Farbiges Testbild: rotes, grünes, blaues Feld auf beigem Papier."""
+    img = np.zeros((h, w, 3), np.float32)
+    img[:] = (0.80, 0.74, 0.60)
+    img[50:150, 50:200] = (0.75, 0.15, 0.12)
+    img[50:150, 250:400] = (0.15, 0.55, 0.20)
+    img[200:300, 50:200] = (0.12, 0.20, 0.70)
+    img[200:300, 250:400] = (0.30, 0.30, 0.30)
+    img[320:390, 50:200] = (0.03, 0.03, 0.03)       # Schwarz (z. B. Schatten, Tinte)
+    img[320:390, 250:400] = (0.97, 0.97, 0.96)      # Weiß
+    return img
+
+
+@pytest.mark.parametrize("ext,fmt", [(".tif", "tif8"), (".png", "png"), (".jpg", "jpg")])
+def test_color_images_stay_color(tmp_path, ext, fmt):
+    src = tmp_path / ("farbe" + ext)
+    P.save_image(str(src), P.to_uint(color_photo(), 8), fmt)
+    loaded = P.load_image(str(src))
+    assert loaded.color is not None and loaded.color.shape == (400, 600, 3)
+    doc = P.Document(loaded)
+    # Original: Farben unverändert
+    out = P.render(doc.prepare(P.Settings()), P.Settings(), color=True)
+    assert out.shape == (400, 600, 3)
+    assert np.abs(out[100, 120] - (0.75, 0.15, 0.12)).max() < 0.03
+    # Bearbeitet (Streckung, Schärfen, Drehung, Zuschnitt): Rot bleibt rot, Blau bleibt blau
+    s = P.with_tonal(P.Settings(rotation=90, crop=(50, 40, 300, 500)),
+                     BUILTIN_PRESETS["Streckung + Hochpassfilter"])
+    path = tmp_path / ("bearbeitet" + ext)
+    P.export(doc, s, str(path), fmt)
+    back = P.load_image(str(path))
+    assert back.color is not None and back.data.shape == (500, 300)
+    c = P.as_float(back.color)
+    rot = P.rotate_image(color_photo(), 90)[40:540, 50:350]
+    red = np.all(np.abs(rot - (0.75, 0.15, 0.12)) < 0.01, axis=2)
+    blue = np.all(np.abs(rot - (0.12, 0.20, 0.70)) < 0.01, axis=2)
+    r, b = c[red].mean(axis=0), c[blue].mean(axis=0)
+    # Farbton bleibt: Kanäle stehen im selben Verhältnis wie im Original
+    assert r[0] > 3.5 * r[1] and r[0] > 3.5 * r[2]
+    assert b[2] > 3 * b[0] and b[2] > 2.5 * b[1]
+
+
+def test_gray_saved_as_rgb_is_treated_as_gray(tmp_path):
+    g = (np.random.default_rng(0).random((200, 300)) * 255).astype(np.uint8)
+    path = tmp_path / "grau_rgb.png"
+    P.save_image(str(path), np.dstack([g, g, g]), "png")
+    loaded = P.load_image(str(path))
+    assert loaded.color is None
+    np.testing.assert_array_equal(loaded.data, g)

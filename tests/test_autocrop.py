@@ -7,6 +7,16 @@ from luftbild_editor import processing as P
 from tests.sample import synthetic_aerial
 
 
+def _write(img, positions, text, scale, value, thickness=2):
+    """Text in ein float-Bild schreiben (OpenCV zeichnet Text nur in 8-Bit-Bilder)."""
+    canvas = np.zeros(img.shape, np.uint8)
+    for x, y in positions:
+        cv2.putText(canvas, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, 255, thickness)
+    out = img.copy()
+    out[canvas > 0] = value
+    return out
+
+
 def archive_photo(angle, seed=0, size=(2000, 1500)):
     """Foto einer Archivale: helles Blatt mit Schrift auf dunklem Tisch, Hand und Stift."""
     w, h = size
@@ -14,8 +24,8 @@ def archive_photo(angle, seed=0, size=(2000, 1500)):
     img = np.full((h, w), 0.25, np.float32) + rng.normal(0, 0.03, (h, w)).astype(np.float32)
     box = cv2.boxPoints(((w * 0.5, h * 0.5), (w * 0.55, h * 0.53), angle)).astype(np.int32)
     cv2.fillPoly(img, [box], 0.85)
-    for y in range(int(h * 0.33), int(h * 0.66), 40):
-        cv2.line(img, (int(w * 0.35), y), (int(w * 0.62), y), 0.3, 3)
+    img = _write(img, [(int(w * 0.35), y) for y in range(int(h * 0.33), int(h * 0.66), 40)],
+                 "Bericht 1944 Blatt", 0.6 * w / 2000 * 1.6, 0.25)
     cv2.ellipse(img, (int(w * 0.72), int(h * 0.7)), (180, 90), 30, 0, 360, 0.55, -1)
     cv2.line(img, (200, 300), (900, 450), 0.1, 12)
     return np.clip(img, 0, 1), box
@@ -74,3 +84,42 @@ def test_align_near_previous_position():
     # kleiner Rahmen: viele Lagen passen – die nächste zur bisherigen Mitte gewinnt
     crop = A.align_to_content(doc, 0.0, (400, 300), near=(400, 400))
     assert abs(crop[0] + 200 - 400) < 20 and abs(crop[1] + 150 - 400) < 20
+
+
+def page_without_border(w=1600, h=1200, seed=3):
+    """Blatt füllt das ganze Foto: kein Tisch, nur Papier mit Schrift (leicht ungleich hell)."""
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:h, 0:w]
+    img = (0.82 + 0.06 * xx / w - 0.04 * yy / h).astype(np.float32)
+    img += rng.normal(0, 0.01, (h, w)).astype(np.float32)
+    pos = [(x, y) for y in range(int(h * 0.08), int(h * 0.92), 34)
+           for x in range(int(w * 0.07), int(w * 0.9), 60) if rng.random() < 0.8]
+    img = _write(img, pos, "abc", 0.6, 0.15)
+    # Fleck/Schatten am Rand (keine Schrift)
+    cv2.ellipse(img, (int(w * 0.95), int(h * 0.5)), (60, 200), 0, 0, 360, 0.6, -1)
+    return np.clip(img, 0, 1)
+
+
+def test_sheet_filling_photo_keeps_whole_image():
+    doc = P.Document(P.LoadedImage(page_without_border(), 16, None))
+    rotation, crop = A.detect_sheet(doc)
+    assert rotation == 0.0 and crop == (0, 0, 1600, 1200)
+
+
+def test_text_region_used_when_no_sheet_edge():
+    # Text nur in der linken Hälfte, Papier ohne Kante -> Zuschnitt umfasst die Schrift
+    img = np.full((1200, 1600), 0.85, np.float32)
+    img = _write(img, [(120, y) for y in range(150, 1050, 34)], "Archivale 1944", 0.7, 0.15)
+    doc = P.Document(P.LoadedImage(img, 16, None))
+    rotation, (x, y, w, h) = A.detect_sheet(doc)
+    assert x <= 120 and y <= 130 and x + w >= 300 and y + h >= 1040
+    assert x + w < 1600 and w * h < 0.8 * 1600 * 1200
+
+
+def test_text_mask_ignores_hand_and_table():
+    img, _ = archive_photo(0)
+    tm = A.text_mask(P._resize_long(img, A.WORK_SIDE)[0])
+    ys, xs = np.nonzero(tm)
+    # Schrift liegt im Blatt (Mitte), nicht bei Hand (rechts unten) oder Stift (links oben)
+    assert xs.size > 200
+    assert np.mean((xs > 0.25 * tm.shape[1]) & (xs < 0.75 * tm.shape[1])) > 0.9

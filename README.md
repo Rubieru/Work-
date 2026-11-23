@@ -75,13 +75,18 @@ GIS-Programme dunkle Stellen nicht als NoData behandeln.
    „Jedes Bild mit seinem eigenen Rahmen“ und „Regler für jedes Bild automatisch anpassen“.
    Alle Bilder werden in einem Schritt zugeschnitten, bearbeitet und gespeichert.
 
+**Farbbilder** werden in Farbe angezeigt, bearbeitet und gespeichert; alle Filter wirken auf
+die Helligkeit, Farbton und Sättigung bleiben erhalten.
+
 **Automatisch zuschneiden** (Schritt 1, läuft komplett offline):
 - *Rahmen an Bildinhalt ausrichten* (Luftbilder): erkennt den schwarzen Scanrahmen mit
   Messmarken und Beschriftung. Mit „Größe festhalten“ bleibt die Größe gleich, nur die Lage
   passt sich an; mit „Beim Bildwechsel automatisch ausrichten“ geschieht das beim Wechsel zum
   nächsten Bild von selbst – nur noch fein nachschieben.
 - *Blatt erkennen (Archivalien)*: findet in Fotos aus dem Archiv das Blatt, dreht es gerade
-  und schneidet Tisch, Hände und Stifte weg (nicht pixelgenau).
+  und schneidet Tisch, Hände und Stifte weg (nicht pixelgenau). Genutzt werden Helligkeit,
+  Kanten, die Papierfarbe und die Schrift: der Ausschnitt enthält immer die ganze Schrift;
+  füllt das Blatt das ganze Foto, bleibt das ganze Bild stehen.
 - „Bei allen“ wendet das jeweils auf alle Bilder der Liste an.
 
 **Bilderliste:** mehrere Bilder mit Strg/Umschalt + Klick oder Strg+A markieren, dann
