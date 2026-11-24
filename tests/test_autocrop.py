@@ -24,8 +24,14 @@ def archive_photo(angle, seed=0, size=(2000, 1500)):
     img = np.full((h, w), 0.25, np.float32) + rng.normal(0, 0.03, (h, w)).astype(np.float32)
     box = cv2.boxPoints(((w * 0.5, h * 0.5), (w * 0.55, h * 0.53), angle)).astype(np.int32)
     cv2.fillPoly(img, [box], 0.85)
-    img = _write(img, [(int(w * 0.35), y) for y in range(int(h * 0.33), int(h * 0.66), 40)],
-                 "Bericht 1944 Blatt", 0.6 * w / 2000 * 1.6, 0.25)
+    # Schrift liegt auf dem Blatt und ist mit ihm gedreht (wie in einem echten Foto)
+    canvas = np.zeros((h, w), np.uint8)
+    for y in range(int(h * 0.33), int(h * 0.66), 40):
+        cv2.putText(canvas, "Bericht 1944 Blatt", (int(w * 0.35), y), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6 * w / 2000 * 1.6, 255, 2)
+    m = cv2.getRotationMatrix2D((w * 0.5, h * 0.5), -angle, 1.0)
+    canvas = cv2.warpAffine(canvas, m, (w, h))
+    img[canvas > 127] = 0.25
     cv2.ellipse(img, (int(w * 0.72), int(h * 0.7)), (180, 90), 30, 0, 360, 0.55, -1)
     cv2.line(img, (200, 300), (900, 450), 0.1, 12)
     return np.clip(img, 0, 1), box
@@ -180,7 +186,10 @@ def test_aerial_alignment_leaves_archive_photos_alone():
 FONT_FILES = ["/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
               "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
               "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
-              "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
+              "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+              # Windows
+              "C:/Windows/Fonts/cour.ttf", "C:/Windows/Fonts/consola.ttf",
+              "C:/Windows/Fonts/times.ttf", "C:/Windows/Fonts/arial.ttf"]
 
 
 def text_page(seed=0, w=1240, h=1754, landscape=False):
