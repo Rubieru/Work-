@@ -315,3 +315,167 @@ def _crop_from_text(doc: P.Document, text, f0: float, w: int, h: int):
         return 0.0, (0, 0, W, H)
     crop = (round(x0 * f0), round(y0 * f0), round((x1 - x0) * f0), round((y1 - y0) * f0))
     return 0.0, P.clamp_crop(crop, W, H)
+
+
+# --------------------------------------------------------------------------
+# Leserichtung: Bild so drehen, dass die Schrift waagerecht und aufrecht steht
+# --------------------------------------------------------------------------
+
+ORIENT_SIDE = 1600   # Rechengröße: Schrift muss noch in Buchstaben aufgelöst sein
+
+
+def _orientation_region(doc: P.Document, rotation: float, crop):
+    """Graubild des (gedrehten, zugeschnittenen) Bereichs in Rechengröße."""
+    img = P.rotate_image(doc.raw, rotation)
+    if crop:
+        x, y, w, h = P.clamp_crop(crop, img.shape[1], img.shape[0])
+        img = img[y:y + h, x:x + w]
+    small, _ = P._resize_long(img, ORIENT_SIDE)
+    small = P.as_float(small).astype(np.float32)
+    # Körnung/Rauschen dämpfen: einzelne Störpixel verfälschen sonst die Ober-/Unterlängen
+    return cv2.medianBlur(small, 3)
+
+
+def _char_size(tm: np.ndarray) -> float:
+    """Typische Buchstabengröße in Pixeln (Median der Schriftflecken)."""
+    n, _, st, _ = cv2.connectedComponentsWithStats(tm.astype(np.uint8), connectivity=8)
+    if n <= 1:
+        return 8.0
+    return float(np.median(np.maximum(st[1:, 2], st[1:, 3])))
+
+
+def _line_score(tm: np.ndarray, char: float | None = None) -> float:
+    """Wie deutlich bilden die Schriftpixel waagerechte Zeilen? Das Zeilenprofil wechselt
+    regelmäßig zwischen Schrift und Zeilenabstand. Es wird auf Buchstabenbreite geglättet:
+    so verschwindet das feine Spaltenmuster einer Schreibmaschinenschrift (alle Buchstaben
+    stehen untereinander), das gröbere Zeilenmuster bleibt."""
+    prof = tm.mean(axis=1).astype(np.float32)
+    if prof.sum() <= 0:
+        return 0.0
+    k = max(1, int(round(char if char else _char_size(tm))))
+    prof = np.convolve(prof, np.ones(k) / k, mode="same")
+    return float(np.abs(np.diff(prof)).sum() / (prof.sum() + 1e-9))
+
+
+def _text_lines(tm: np.ndarray):
+    """Zeilen (y0, y1) aus dem Zeilenprofil einer waagerecht liegenden Schrift."""
+    prof = tm.mean(axis=1)
+    on = prof > max(prof.max() * 0.08, 1e-4)
+    lines, start = [], None
+    for y, v in enumerate(on):
+        if v and start is None:
+            start = y
+        elif not v and start is not None:
+            lines.append((start, y))
+            start = None
+    if start is not None:
+        lines.append((start, len(on)))
+    return [(a, b) for a, b in lines if b - a >= 3]
+
+
+def _word_boxes(tm: np.ndarray):
+    """Wörter: Schriftpixel waagerecht zu Blöcken verbinden (Buchstabenabstand)."""
+    n, lab, st, _ = cv2.connectedComponentsWithStats(tm.astype(np.uint8), connectivity=8)
+    if n <= 1:
+        return []
+    heights = st[1:, 3]
+    ch = float(np.median(heights))                     # typische Buchstabenhöhe
+    k = max(3, int(ch * 0.9) | 1)
+    words = cv2.morphologyEx(tm.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((1, k), np.uint8))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(words, connectivity=8)
+    out = []
+    for i in range(1, n):
+        x, y, w, h, area = st[i]
+        # Wort: breiter als hoch, nicht riesig (keine Tabellenlinien/Flecken)
+        if w >= 2 * h and ch * 0.6 <= h <= ch * 3.5:
+            out.append((x, y, w, h))
+    return out
+
+
+def _upright_score(tm: np.ndarray) -> float:
+    """> 0: Schrift steht aufrecht, < 0: auf dem Kopf.
+
+    Je Wort wird die Mittelhöhe (Zeilen mit viel Tinte) bestimmt. Großbuchstaben und
+    b, d, f, h, k, l, t ragen darüber hinaus, nach unten nur g, j, p, q, y – über der
+    Mittelhöhe liegt bei deutscher (und englischer) Schrift deutlich mehr Tinte.
+    Ergänzend, schwächer gewichtet: Zeilenanfänge stehen meist bündig.
+    """
+    top = bottom = 0.0
+    for x, y, w, h in _word_boxes(tm):
+        p = tm[y:y + h, x:x + w].sum(axis=1).astype(np.float32)
+        if p.max() <= 0:
+            continue
+        core = np.nonzero(p >= 0.5 * p.max())[0]
+        top += float(p[:core.min()].sum())
+        bottom += float(p[core.max() + 1:].sum())
+    s1 = (top - bottom) / (top + bottom) if top + bottom > 0 else 0.0
+    starts, ends = [], []
+    for a, b in _text_lines(tm):
+        cols = np.nonzero(tm[a:b].any(axis=0))[0]
+        if cols.size:
+            starts.append(cols.min())
+            ends.append(cols.max())
+    s2 = 0.0
+    if len(starts) >= 3:
+        sa, se = float(np.std(starts)), float(np.std(ends))
+        s2 = (se - sa) / (se + sa + 1e-9)
+    return s1 + 0.2 * s2
+
+
+def _best_skew(tm: np.ndarray):
+    """Kleinen Schräglagenwinkel und Achse finden, bei denen die Zeilen am schärfsten
+    sind. Gibt (Winkel in Grad, waagerecht?) zurück."""
+    m = tm.astype(np.float32)
+
+    char = _char_size(tm)
+
+    def score(angle):
+        r = P.rotate_image(m, angle) > 0.5 if angle else tm
+        return _line_score(r, char), _line_score(r.T, char)
+
+    best = (-1.0, 0.0, True)
+    for ang in np.arange(-15.0, 15.01, 1.5):
+        sh, sv = score(float(ang))
+        best = max(best, (sh, float(ang), True), (sv, float(ang), False))
+    for ang in np.arange(best[1] - 1.0, best[1] + 1.01, 0.25):   # verfeinern
+        sh, sv = score(float(ang))
+        cand = (sh, float(ang), True) if best[2] else (sv, float(ang), False)
+        best = max(best, cand)
+    return best[1], best[2]
+
+
+def detect_orientation(doc: P.Document, rotation: float = 0.0, crop=None) -> float | None:
+    """Zusätzliche Drehung in Grad, damit die Schrift waagerecht und aufrecht steht:
+    ein Vielfaches von 90° plus eine kleine Schräglagenkorrektur. None, wenn keine
+    Schrift gefunden wurde."""
+    small = _orientation_region(doc, rotation, crop)
+    tm = text_mask(small)
+    if tm.sum() < 200:
+        return None
+    skew, horiz = _best_skew(tm)
+    straight = P.rotate_image(tm.astype(np.float32), skew) > 0.5 if skew else tm
+    turn = 0 if horiz else 90
+    base = straight if horiz else np.ascontiguousarray(np.rot90(straight, -1))
+    if _upright_score(base) < 0:
+        turn += 180
+    total = (turn + skew) % 360
+    return round(total if total <= 180 else total - 360, 2)
+
+
+def auto_orient(doc: P.Document, rotation: float = 0.0, crop=None):
+    """Bild lesbar drehen. Gibt (neue Drehung, neuer Zuschnitt) zurück oder None.
+
+    Die Leserichtung wird auf dem Blatt gemessen – ohne Zuschnitt wird es zuerst gesucht,
+    denn Holzmaserung, Teppich o. Ä. neben dem Blatt sähen sonst wie Schrift aus.
+    Ein vorhandener Zuschnitt dreht mit (bleibt über demselben Bildinhalt).
+    """
+    if crop is None:
+        found = detect_sheet(doc)
+        if found is not None:
+            rotation, crop = found
+    delta = detect_orientation(doc, rotation, crop)
+    if delta is None:
+        return None
+    new = P.normalize_angle(rotation + delta)
+    new_crop = P.follow_rotation(crop, doc.size, rotation, new) if crop else None
+    return new, new_crop

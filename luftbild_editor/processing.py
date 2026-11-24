@@ -379,8 +379,10 @@ def follow_rotation(crop, size: tuple[int, int], old: float, new: float):
     cx, cy = x + (cw - 1) / 2.0, y + (ch - 1) / 2.0
     sx, sy = inv @ (cx, cy, 1.0)
     nx, ny = rotation_matrix(w, h, new) @ (sx, sy, 1.0)
-    k = quarter_turns(new - old)
-    if k is not None and k % 2:
+    # Vierteldrehung (auch mit kleiner Schräglagenkorrektur, z. B. 89°): Seiten tauschen
+    diff = normalize_angle(new - old)
+    k = round(diff / 90.0)
+    if k % 2 and abs(diff - 90.0 * k) <= 20.0:
         cw, ch = ch, cw
     nw, nh = rotated_size(w, h, new)
     cw, ch = min(cw, nw), min(ch, nh)

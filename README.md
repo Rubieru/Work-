@@ -87,6 +87,10 @@ die Helligkeit, Farbton und Sättigung bleiben erhalten.
   und schneidet Tisch, Hände und Stifte weg (nicht pixelgenau). Genutzt werden Helligkeit,
   Kanten, die Papierfarbe und die Schrift: der Ausschnitt enthält immer die ganze Schrift;
   füllt das Blatt das ganze Foto, bleibt das ganze Bild stehen.
+- *Lesbar drehen* (Archivfotos): dreht so, dass die Schrift waagerecht und aufrecht steht
+  (90°/180°/270° plus kleine Schräglage) – alle Bilder schauen danach in dieselbe Richtung.
+  Gemessen wird ohne Texterkennung: Zeilenmuster ergibt die Achse, Ober-/Unterlängen und
+  bündige Zeilenanfänge ergeben oben/unten. „Blatt erkennen“ dreht auf Wunsch gleich mit.
 - „Bei allen“ wendet das jeweils auf alle Bilder der Liste an.
 
 **Bilderliste:** mehrere Bilder mit Strg/Umschalt + Klick oder Strg+A markieren, dann

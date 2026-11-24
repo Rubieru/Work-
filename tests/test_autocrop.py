@@ -173,3 +173,72 @@ def test_aerial_alignment_leaves_archive_photos_alone():
     # Luftbild mit Scanrahmen weiterhin
     img, _ = framed_aerial(90, 130)
     assert A.align_to_content(P.Document(P.LoadedImage(img, 16, None)), 0.0, None) is not None
+
+
+# ---------------------------------------------------------------- Leserichtung
+
+FONT_FILES = ["/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+              "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+              "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+              "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
+
+
+def text_page(seed=0, w=1240, h=1754, landscape=False):
+    """Lesbare Seite mit deutscher Schrift (Brief oder Tabelle), aufrecht."""
+    import os
+    import random
+    from PIL import Image, ImageDraw, ImageFont
+    fonts = [f for f in FONT_FILES if os.path.exists(f)]
+    if not fonts:
+        pytest.skip("keine TrueType-Schrift verfügbar")
+    rnd = random.Random(seed)
+    if landscape:
+        w, h = h, w
+    words = ("der die das und in den von zu mit Bürgermeister Landrat Kreises Fliegeralarm "
+             "Luftschutz Nachweisung Monat Gemeinde Bericht Anlage Juni 1943 Zahl Std. Min. "
+             "Angriffe Bomben gefallen Gebäude gemeldet worden erfolgte").split()
+    img = Image.new("L", (w, h), 236)
+    d = ImageDraw.Draw(img)
+    font = ImageFont.truetype(rnd.choice(fonts), rnd.choice([22, 26, 30]))
+    y = rnd.randint(90, 250)
+    while y < h - 150:
+        line = " ".join(rnd.choice(words) for _ in range(rnd.randint(3, 8)))
+        d.text((rnd.choice([110, 110, 110, 300]), y), line, font=font, fill=40)
+        y += int(font.size * rnd.uniform(1.5, 2.1))
+    a = np.array(img, np.float32) + np.random.default_rng(seed).normal(0, 4, (h, w))
+    return np.clip(a, 0, 255).astype(np.uint8)
+
+
+@pytest.mark.parametrize("seed", range(6))
+@pytest.mark.parametrize("k", [0, 1, 2, 3])
+def test_orientation_turns_text_upright(seed, k):
+    page = text_page(seed, landscape=seed % 2 == 1)
+    turned = np.ascontiguousarray(np.rot90(page, -k))      # um k*90° im UZS verdreht
+    got = A.detect_orientation(P.Document(P.LoadedImage(turned, 8, None)))
+    want = (-k * 90) % 360
+    assert got is not None and abs(((got - want + 180) % 360) - 180) <= 1.0
+
+
+def test_orientation_corrects_small_skew():
+    page = text_page(3)
+    h, w = page.shape
+    m = cv2.getRotationMatrix2D((w / 2, h / 2), 5, 1)       # 5° gegen den Uhrzeigersinn
+    tilted = cv2.warpAffine(page, m, (w, h), borderValue=236)
+    got = A.detect_orientation(P.Document(P.LoadedImage(tilted, 8, None)))
+    assert abs(got - 5) <= 1.0                               # 5° im Uhrzeigersinn zurück
+
+
+def test_auto_orient_on_photo_measures_on_sheet():
+    # Blatt mit Schrift auf Holztisch, Foto um 90° verdreht: Ergebnis aufrecht und zugeschnitten
+    rgb = wood_table_photo()
+    page = text_page(1, w=500, h=690)
+    x0, y0 = 560, 20
+    for c in range(3):
+        rgb[y0:y0 + 690, x0:x0 + 500, c] = page / 255.0
+    u8 = np.ascontiguousarray(np.rot90(P.to_uint(rgb, 8), -1))
+    doc = P.Document(P.LoadedImage(cv2.cvtColor(u8, cv2.COLOR_RGB2GRAY), 8, None, None, u8))
+    rotation, crop = A.auto_orient(doc)
+    assert abs(((rotation - 270 + 180) % 360) - 180) <= 2.0  # 90° zurück
+    base = P.as_float(doc.prepare(P.Settings(rotation=rotation, crop=crop)).base)
+    assert base.shape[0] > base.shape[1]                      # Blatt steht wieder hochkant
+    assert (base > 0.6).mean() > 0.8
