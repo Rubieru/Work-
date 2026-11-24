@@ -462,12 +462,11 @@ def detect_orientation(doc: P.Document, rotation: float = 0.0, crop=None) -> flo
     return round(total if total <= 180 else total - 360, 2)
 
 
-def auto_orient(doc: P.Document, rotation: float = 0.0, crop=None):
-    """Bild lesbar drehen. Gibt (neue Drehung, neuer Zuschnitt) zurück oder None.
+def crop_and_orient(doc: P.Document, rotation: float = 0.0, crop=None):
+    """Blatt finden, zuschneiden, gerade richten und lesbar drehen.
 
-    Die Leserichtung wird auf dem Blatt gemessen – ohne Zuschnitt wird es zuerst gesucht,
-    denn Holzmaserung, Teppich o. Ä. neben dem Blatt sähen sonst wie Schrift aus.
-    Ein vorhandener Zuschnitt dreht mit (bleibt über demselben Bildinhalt).
+    Gibt (neue Drehung, neuer Zuschnitt) zurück oder None (weder Blatt noch Schrift).
+    Ohne Zuschnitt wird zuerst das Blatt gesucht; ein vorhandener Zuschnitt dreht mit.
     """
     if crop is None:
         found = detect_sheet(doc)
@@ -477,5 +476,32 @@ def auto_orient(doc: P.Document, rotation: float = 0.0, crop=None):
     if delta is None:
         return None
     new = P.normalize_angle(rotation + delta)
+    new_crop = P.follow_rotation(crop, doc.size, rotation, new) if crop else None
+    return new, new_crop
+
+
+# alter Name (Kompatibilität)
+auto_orient = crop_and_orient
+
+
+def orient_only(doc: P.Document, rotation: float = 0.0, crop=None):
+    """Nur lesbar drehen – in 90°-Schritten (verlustfrei), ohne neuen Rahmen.
+
+    Der vorhandene Zuschnitt dreht mit (bleibt über demselben Bildinhalt); ohne Zuschnitt
+    bleibt das ganze Bild. Gemessen wird trotzdem auf dem Blatt, falls eins zu finden ist
+    (Holzmaserung o. Ä. daneben sähe sonst wie Schrift aus) – übernommen wird nur die
+    Drehung. Gibt (neue Drehung, Zuschnitt) zurück oder None, wenn keine Schrift da ist.
+    """
+    m_rot, m_crop = rotation, crop
+    if crop is None:
+        found = detect_sheet(doc)
+        if found is not None:
+            m_rot, m_crop = found
+    delta = detect_orientation(doc, m_rot, m_crop)
+    if delta is None:
+        return None
+    total = P.normalize_angle(m_rot + delta)
+    quarter = round(P.normalize_angle(total - rotation) / 90.0) * 90.0
+    new = P.normalize_angle(rotation + quarter)
     new_crop = P.follow_rotation(crop, doc.size, rotation, new) if crop else None
     return new, new_crop

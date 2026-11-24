@@ -251,3 +251,21 @@ def test_auto_orient_on_photo_measures_on_sheet():
     base = P.as_float(doc.prepare(P.Settings(rotation=rotation, crop=crop)).base)
     assert base.shape[0] > base.shape[1]                      # Blatt steht wieder hochkant
     assert (base > 0.6).mean() > 0.8
+
+
+@pytest.mark.parametrize("k", [0, 1, 2, 3])
+def test_orient_only_turns_in_quarter_steps_without_new_frame(k):
+    page = text_page(2)                                     # schon zugeschnittenes Blatt
+    turned = np.ascontiguousarray(np.rot90(page, -k))
+    doc = P.Document(P.LoadedImage(turned, 8, None))
+    rotation, crop = A.orient_only(doc)
+    assert crop is None                                     # kein neuer Rahmen
+    assert rotation == P.normalize_angle(-k * 90)            # genau 90°-Schritte
+    # mit vorhandenem Rahmen: Rahmen dreht mit, zeigt denselben Inhalt
+    w, h = doc.size
+    crop0 = (w // 10, h // 10, w // 2, h // 3)
+    rotation, crop = A.orient_only(doc, 0.0, crop0)
+    before = doc.prepare(P.Settings(crop=crop0)).base
+    after = doc.prepare(P.Settings(rotation=rotation, crop=crop)).base
+    assert sorted(after.shape) == sorted(before.shape)
+    assert np.array_equal(np.rot90(before, -round(rotation / 90) % 4), after)

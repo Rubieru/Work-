@@ -410,21 +410,28 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         b = QPushButton("Lesbar drehen")
         b.setToolTip(
-            "Dreht das Bild so, dass die Schrift waagerecht und aufrecht steht "
-            "(90°, 180° oder 270° plus kleine Schräglage). Gemessen wird auf dem Blatt – "
-            "ist noch kein Ausschnitt gesetzt, wird es vorher erkannt.")
+            "Dreht nur – in 90°-Schritten (verlustfrei) –, sodass die Schrift aufrecht "
+            "steht. Der Rahmen bleibt: ein vorhandener Rahmen dreht mit, ohne Rahmen bleibt "
+            "das ganze Bild. Für bereits zugeschnittene Bilder.")
         b.clicked.connect(self.auto_orient_current)
         row.addWidget(b)
         b = QPushButton("Bei allen")
-        b.setToolTip("Alle Bilder der Liste lesbar drehen – danach schauen alle in dieselbe "
-                     "Richtung.")
+        b.setToolTip("Alle Bilder der Liste lesbar drehen (nur drehen, Rahmen bleibt).")
         b.clicked.connect(lambda: self.auto_crop_all("orient"))
         row.addWidget(b)
         la.addLayout(row)
-        self.chk_orient = QCheckBox("Beim Blatt erkennen auch lesbar drehen")
-        self.chk_orient.setChecked(QSettings().value("sheet_orient", True, type=bool))
-        self.chk_orient.toggled.connect(lambda v: QSettings().setValue("sheet_orient", v))
-        la.addWidget(self.chk_orient)
+        row = QHBoxLayout()
+        b = QPushButton("Zuschneiden + lesbar drehen")
+        b.setToolTip(
+            "Findet das Blatt, schneidet zu, richtet es gerade und dreht es so, dass die "
+            "Schrift aufrecht steht.")
+        b.clicked.connect(self.auto_crop_orient_current)
+        row.addWidget(b)
+        b = QPushButton("Bei allen")
+        b.setToolTip("Alle Bilder der Liste zuschneiden und lesbar drehen.")
+        b.clicked.connect(lambda: self.auto_crop_all("crop_orient"))
+        row.addWidget(b)
+        la.addLayout(row)
         lay.addWidget(ga)
 
         g = QGroupBox("Ausschnitt (Pixel)")
@@ -1024,14 +1031,6 @@ class MainWindow(QMainWindow):
                 "hell sind). Bitte den Rahmen von Hand setzen.")
             return
         rotation, crop = found
-        if self.chk_orient.isChecked():
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            try:
-                turned = autocrop.auto_orient(self.doc, rotation, crop)
-            finally:
-                QApplication.restoreOverrideCursor()
-            if turned is not None:
-                rotation, crop = turned
         self._set_settings(replace(self.entry.settings, rotation=rotation, crop=crop))
         self.sl_rotation.setValue(rotation)
         self._sync_crop_controls()
@@ -1040,12 +1039,18 @@ class MainWindow(QMainWindow):
             8000)
 
     def auto_orient_current(self):
+        self._orient_current(autocrop.orient_only)
+
+    def auto_crop_orient_current(self):
+        self._orient_current(autocrop.crop_and_orient)
+
+    def _orient_current(self, fn):
         if not self.doc:
             return
         s = self.entry.settings
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            turned = autocrop.auto_orient(self.doc, s.rotation, s.crop)
+            turned = fn(self.doc, s.rotation, s.crop)
         finally:
             QApplication.restoreOverrideCursor()
         if turned is None:
@@ -1070,7 +1075,6 @@ class MainWindow(QMainWindow):
         size = tuple(cur[2:]) if (lock and cur) else None
         jobs = [(e, e.path, e.settings.rotation, e.settings.crop) for e in self.entries]
         current_doc, current_entry = self.doc, self.entry
-        orient = self.chk_orient.isChecked()
         self._autocrop_mode = mode
         self._start_progress(f"{len(jobs)} Bilder werden automatisch zugeschnitten …",
                              cancel=True)
@@ -1087,14 +1091,14 @@ class MainWindow(QMainWindow):
                         P.Document.open(path)
                     if mode == "sheet":
                         found = autocrop.detect_sheet(doc)
-                        if found is not None and orient:
-                            found = autocrop.auto_orient(doc, *found) or found
                         if found is None:
                             failed.append(os.path.basename(path))
                         else:
                             results.append((e, found[0], found[1]))
-                    elif mode == "orient":
-                        found = autocrop.auto_orient(doc, rotation, crop)
+                    elif mode in ("orient", "crop_orient"):
+                        fn = autocrop.orient_only if mode == "orient" \
+                            else autocrop.crop_and_orient
+                        found = fn(doc, rotation, crop)
                         if found is None:
                             failed.append(os.path.basename(path) + " (keine Schrift)")
                         else:
@@ -1133,6 +1137,8 @@ class MainWindow(QMainWindow):
             self._update_list_item(e)
         if getattr(self, "_autocrop_mode", "") == "orient":
             text = f"{len(results)} Bilder lesbar gedreht."
+        elif getattr(self, "_autocrop_mode", "") == "crop_orient":
+            text = f"{len(results)} Bilder zugeschnitten und lesbar gedreht (✂ in der Liste)."
         else:
             text = f"{len(results)} Bilder automatisch zugeschnitten (✂ in der Liste)."
         if failed:

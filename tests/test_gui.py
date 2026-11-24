@@ -562,3 +562,41 @@ def test_replace_asks_before_overwriting(app, tmp_path, monkeypatch):
     dlg.deleteLater()
     app.processEvents()
     QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+
+def test_orient_buttons_only_rotate_or_crop_and_rotate(app, tmp_path, monkeypatch):
+    from luftbild_editor.main_window import MainWindow
+    from tests.test_autocrop import text_page, wood_table_photo
+    monkeypatch.setattr("PySide6.QtCore.QStandardPaths.writableLocation",
+                        lambda *_: str(tmp_path / "cfg"))
+    page = text_page(4)
+    files = []
+    for k in range(3):                                      # zugeschnittene, verdrehte Blätter
+        f = tmp_path / f"blatt{k}.png"
+        P.save_image(str(f), np.ascontiguousarray(np.rot90(page, -k)), "png")
+        files.append(str(f))
+    win = MainWindow()
+    win.show()
+    win.add_files(files)
+    wait(app)
+    win.auto_crop_all("orient")
+    wait(app)
+    for _ in range(10):
+        app.processEvents()
+    for k, e in enumerate(win.entries):
+        assert e.settings.crop is None                      # Rahmen unverändert (keiner)
+        assert e.settings.rotation == P.normalize_angle(-k * 90)
+    # Zuschneiden + lesbar drehen: Foto mit Blatt auf Tisch -> Rahmen und Drehung
+    rgb = wood_table_photo()
+    small = text_page(1, w=500, h=690)
+    for c in range(3):
+        rgb[20:710, 560:1060, c] = small / 255.0
+    photo = tmp_path / "foto.jpg"
+    P.save_image(str(photo), np.ascontiguousarray(np.rot90(P.to_uint(rgb, 8), -1)), "jpg")
+    win.add_files([str(photo)])
+    wait(app)
+    win.auto_crop_orient_current()
+    e = win.entry
+    assert e.settings.crop is not None
+    assert abs(((e.settings.rotation - 270 + 180) % 360) - 180) <= 2
+    win.close()
