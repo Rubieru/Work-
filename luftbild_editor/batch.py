@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass, replace
 
 from PySide6.QtCore import Qt
@@ -32,6 +33,68 @@ class BatchJob:
     geometries: dict | None = None
     # eigene Regler je Bild: path_key -> (Regler-Werte als dict, Automatik-Variante oder None)
     per_image: dict | None = None
+    overwrite: bool = False   # Originale ersetzen (gleicher Ordner, Name und Format)
+    backup: bool = True       # vorher Sicherungskopie in BACKUP_DIR
+
+
+BACKUP_DIR = "Originale_Sicherung"
+_TMP_DIR = ".luftbild_editor_tmp"
+
+
+def format_for(path: str, bits: int) -> str | None:
+    """Speicherformat, das zum Original passt (für "Originale ersetzen")."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".tif", ".tiff"):
+        return "tif16" if bits == 16 else "tif8"
+    if ext == ".png":
+        return "png"
+    if ext in (".jpg", ".jpeg"):
+        return "jpg"
+    return None
+
+
+def _companions(path: str) -> list[str]:
+    """Begleitdateien mit gleichem Namensstamm (World-File, .prj, .aux.xml)."""
+    folder, name = os.path.split(path)
+    stem = os.path.splitext(name)[0]
+    out = []
+    for other in os.listdir(folder or "."):
+        full = os.path.join(folder, other)
+        if other != name and os.path.isfile(full) and (
+                os.path.splitext(other)[0] == stem or other.startswith(name + ".")):
+            out.append(full)
+    return out
+
+
+def replace_original(doc: P.Document, s: P.Settings, src: str, nodata_safe: bool,
+                     backup: bool) -> str:
+    """Bearbeitetes Bild an die Stelle des Originals schreiben.
+
+    Erst wird vollständig in einen Zwischenordner geschrieben, dann werden die Dateien
+    ausgetauscht – bricht etwas ab, bleibt das Original unverändert.
+    """
+    fmt = format_for(src, doc.bits)
+    if fmt is None:
+        raise ValueError("Dieses Dateiformat kann nicht ersetzt werden – bitte in einen "
+                         "neuen Ordner speichern")
+    folder, name = os.path.split(os.path.abspath(src))
+    if backup:
+        bdir = os.path.join(folder, BACKUP_DIR)
+        os.makedirs(bdir, exist_ok=True)
+        for f in [src] + _companions(src):
+            target = os.path.join(bdir, os.path.basename(f))
+            if not os.path.exists(target):        # erste Sicherung bleibt erhalten
+                shutil.copy2(f, target)
+    tmp = os.path.join(folder, _TMP_DIR)
+    os.makedirs(tmp, exist_ok=True)
+    try:
+        out = os.path.join(tmp, name)
+        P.export(doc, s, out, fmt, nodata_safe=nodata_safe)
+        for f in os.listdir(tmp):
+            os.replace(os.path.join(tmp, f), os.path.join(folder, f))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return os.path.join(folder, name)
 
 
 TONAL_MODES = (
@@ -40,7 +103,7 @@ TONAL_MODES = (
 )
 
 GEOMETRY_MODES = (
-    ("own", "Jedes Bild mit seinem eigenen Rahmen (✂)"),
+    ("own", "Jedes Bild mit eigenem Rahmen (✂) und eigener Drehung"),
     ("same", "Rahmen und Drehung dieses Bildes für alle"),
     ("none", "Nicht zuschneiden"),
 )
@@ -59,13 +122,10 @@ class BatchDialog(QDialog):
         self._auto = auto
 
         lay = QVBoxLayout(self)
-        info = QLabel(
-            f"Die Einstellungen von <b>{source_name}</b> werden auf alle angehakten Bilder "
-            "angewendet. Die Bilder werden in voller Auflösung bearbeitet und gespeichert. "
-            "Die Originale bleiben unverändert, eine Georeferenzierung wird übernommen. "
-            "✂ = Bild hat einen eigenen Zuschnitt-Rahmen.")
-        info.setWordWrap(True)
-        lay.addWidget(info)
+        self._source_name = source_name
+        self.info = QLabel()
+        self.info.setWordWrap(True)
+        lay.addWidget(self.info)
 
         self.list = QListWidget()
         lay.addWidget(self.list, 1)
@@ -99,7 +159,20 @@ class BatchDialog(QDialog):
             "Eigener Rahmen: jedes Bild wird so zugeschnitten und gedreht, wie es im "
             "Schritt 1 eingestellt wurde (Bilder ohne Rahmen bleiben ganz).\n"
             "Rahmen dieses Bildes: sinnvoll, wenn alle Scans exakt gleich liegen.")
-        form.addRow("Zuschneiden", self.geo_mode)
+        form.addRow("Zuschnitt/Drehung", self.geo_mode)
+        self.target = QComboBox()
+        self.target.addItem("In einen neuen Ordner speichern", "folder")
+        self.target.addItem("Originale ersetzen (gleicher Ordner, Name und Format)", "replace")
+        self.target.setToolTip(
+            "Originale ersetzen: jedes Bild wird unter seinem eigenen Namen im eigenen Ordner "
+            "überschrieben (TIFF bleibt TIFF, JPG bleibt JPG). Nicht rückgängig zu machen – "
+            "deshalb standardmäßig mit Sicherungskopie.")
+        self.target.currentIndexChanged.connect(self._on_target)
+        form.addRow("Speichern", self.target)
+        self.chk_backup = QCheckBox(f"Vorher Sicherungskopie der Originale anlegen "
+                                    f"(Unterordner „{BACKUP_DIR}“)")
+        self.chk_backup.setChecked(True)
+        form.addRow(self.chk_backup)
         folder_row = QHBoxLayout()
         self.folder = QLineEdit(os.path.join(start_dir, "bearbeitet") if start_dir else "")
         btn = QPushButton("…")
@@ -114,7 +187,9 @@ class BatchDialog(QDialog):
         form.addRow("Dateiformat", self.fmt)
         self.suffix = QLineEdit("_bearbeitet")
         form.addRow("Zusatz im Dateinamen", self.suffix)
+        self._folder_widgets = [self.folder, btn, self.fmt, self.suffix]
         lay.addLayout(form)
+        self._on_target()
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("Starten")
@@ -122,6 +197,18 @@ class BatchDialog(QDialog):
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
         lay.addWidget(buttons)
+
+    def _on_target(self, *_):
+        replace = self.target.currentData() == "replace"
+        self.info.setText(
+            "Alle angehakten Bilder werden in voller Auflösung bearbeitet und gespeichert, "
+            "eine Georeferenzierung wird übernommen. ✂ = Bild hat einen eigenen "
+            "Zuschnitt-Rahmen. "
+            + ("<b>Die Originaldateien werden ersetzt.</b>" if replace else
+               "Die Originale bleiben unverändert."))
+        for w in self._folder_widgets:
+            w.setEnabled(not replace)
+        self.chk_backup.setVisible(replace)
 
     def _add(self, path):
         path = os.path.abspath(path)
@@ -164,14 +251,18 @@ class BatchDialog(QDialog):
         if not self.job().files:
             self.list.setFocus()
             return
-        if not self.folder.text().strip():
+        replace = self.target.currentData() == "replace"
+        if not replace and not self.folder.text().strip():
             self._pick_folder()
             if not self.folder.text().strip():
                 return
         if self.geo_mode.currentData() == "own":
-            missing = [os.path.basename(f) for f in self.job().files
+            files = self.job().files
+            missing = [os.path.basename(f) for f in files
                        if not (self._geometries.get(path_key(f)) or (0, None))[1]]
-            if missing:
+            # nur warnen, wenn ein Teil zugeschnitten ist und ein Teil nicht – wer nur dreht
+            # oder nur Filter anwendet, braucht keinen Rahmen
+            if missing and len(missing) < len(files):
                 names = "\n".join("• " + n for n in missing[:10])
                 more = f"\n… und {len(missing) - 10} weitere" if len(missing) > 10 else ""
                 answer = QMessageBox.question(
@@ -180,6 +271,16 @@ class BatchDialog(QDialog):
                     f"ungeschnitten gespeichert:\n\n{names}{more}\n\nTrotzdem starten?")
                 if answer != QMessageBox.Yes:
                     return
+        if replace:
+            n = len(self.job().files)
+            text = (f"{n} Originaldatei(en) werden mit dem bearbeiteten Bild überschrieben.\n\n"
+                    + (f"Die Originale werden vorher in den Unterordner „{BACKUP_DIR}“ kopiert."
+                       if self.chk_backup.isChecked() else
+                       "ACHTUNG: Es wird KEINE Sicherungskopie angelegt – die Originale sind "
+                       "danach unwiederbringlich verändert.")
+                    + "\n\nFortfahren?")
+            if QMessageBox.question(self, "Originale ersetzen", text) != QMessageBox.Yes:
+                return
         self.accept()
 
     def job(self) -> BatchJob:
@@ -190,14 +291,17 @@ class BatchDialog(QDialog):
         return BatchJob(files, self.folder.text().strip(), self.fmt.currentData(),
                         self.suffix.text(), mode == "same", self._auto,
                         self._geometries if mode == "own" else None,
-                        self._per_image if own else None)
+                        self._per_image if own else None,
+                        overwrite=self.target.currentData() == "replace",
+                        backup=self.chk_backup.isChecked())
 
 
 def run_batch(job: BatchJob, settings: P.Settings, progress=None, cancelled=None,
               current_doc: P.Document | None = None,
               nodata_safe: bool = False) -> tuple[list, list]:
     """Bearbeitet alle Bilder. Gibt (geschriebene Dateien, Fehler) zurück."""
-    os.makedirs(job.folder, exist_ok=True)
+    if not job.overwrite:
+        os.makedirs(job.folder, exist_ok=True)
     ext = P.EXPORT_FORMATS[job.fmt][1]
     written, errors = [], []
     tonal = P.Settings(**P.tonal_dict(settings))
@@ -227,8 +331,11 @@ def run_batch(job: BatchJob, settings: P.Settings, progress=None, cancelled=None
             if variant:
                 geo = P.Settings(rotation=s.rotation, crop=s.crop)
                 s_img = P.with_tonal(s, P.auto_tonal(doc.prepare(geo), variant))
-            P.export(doc, s_img, out, job.fmt, nodata_safe=nodata_safe)
-            written.append(out)
+            if job.overwrite:
+                written.append(replace_original(doc, s_img, src, nodata_safe, job.backup))
+            else:
+                P.export(doc, s_img, out, job.fmt, nodata_safe=nodata_safe)
+                written.append(out)
         except Exception as exc:  # ein defektes Bild soll den Stapel nicht abbrechen
             errors.append((src, f"{type(exc).__name__}: {exc}"))
         if progress:

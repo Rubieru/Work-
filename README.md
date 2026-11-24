@@ -93,6 +93,14 @@ die Helligkeit, Farbton und Sättigung bleiben erhalten.
   bündige Zeilenanfänge ergeben oben/unten. „Blatt erkennen“ dreht auf Wunsch gleich mit.
 - „Bei allen“ wendet das jeweils auf alle Bilder der Liste an.
 
+**Ordner bearbeiten und Originale ersetzen:** „Ordner öffnen…“ lädt alle Bilder eines
+Ordners. Nach dem Drehen/Zuschneiden/Bearbeiten in der Stapelverarbeitung „Speichern:
+Originale ersetzen“ wählen – jedes Bild wird unter seinem Namen im eigenen Ordner und im
+eigenen Format (TIFF bleibt TIFF, JPG bleibt JPG) überschrieben. Standardmäßig werden die
+Originale vorher in den Unterordner „Originale_Sicherung“ kopiert (die erste Sicherung bleibt
+erhalten). Geschrieben wird erst in eine Zwischendatei; bei einem Fehler bleibt das Original
+unverändert. Danach zeigt die Liste den gespeicherten Stand.
+
 **Bilderliste:** mehrere Bilder mit Strg/Umschalt + Klick oder Strg+A markieren, dann
 Rechtsklick → „Entfernen“ oder Entf-Taste. Rückgängig/Wiederholen mit Strg+Z und Strg+Y.
 

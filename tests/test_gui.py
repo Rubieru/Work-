@@ -495,3 +495,70 @@ def test_auto_crop_all_sheets_then_batch(app, tmp_path, monkeypatch):
         a = P.as_float(P.load_image(str(o)).data)
         assert (a > 0.6).mean() > 0.7, o.name
     win.close()
+
+
+def test_open_folder_rotate_and_replace_originals(app, tmp_path, monkeypatch):
+    from luftbild_editor import batch as B
+    from luftbild_editor.main_window import MainWindow
+    import luftbild_editor.main_window as M
+    monkeypatch.setattr("PySide6.QtCore.QStandardPaths.writableLocation",
+                        lambda *_: str(tmp_path / "cfg"))
+    folder = tmp_path / "Archiv"
+    folder.mkdir()
+    for i in range(3):
+        P.save_image(str(folder / f"blatt{i}.jpg"),
+                     P.to_uint(synthetic_aerial(400, 300, seed=i), 8), "jpg")
+    monkeypatch.setattr(M.QFileDialog, "getExistingDirectory", lambda *a: str(folder))
+    win = MainWindow()
+    win.show()
+    win.open_folder()
+    wait(app)
+    assert len(win.entries) == 3
+    win.tabs.setCurrentIndex(0)
+    for row in range(3):                       # jedes Bild um 90° drehen
+        win.image_list.setCurrentRow(row)
+        wait(app)
+        win._rotate_by(90)
+    wait(app)
+
+    def fake_exec(dlg):
+        dlg.target.setCurrentIndex(dlg.target.findData("replace"))
+        return B.BatchDialog.Accepted
+    monkeypatch.setattr(B.BatchDialog, "exec", fake_exec)
+    monkeypatch.setattr(M.QMessageBox, "information", lambda *a: None)
+    win.batch()
+    wait(app)
+    for i in range(3):
+        assert P.load_image(str(folder / f"blatt{i}.jpg")).data.shape == (400, 300)
+        assert (folder / B.BACKUP_DIR / f"blatt{i}.jpg").exists()
+    # Einstellungen zurückgesetzt -> erneutes Speichern dreht nicht doppelt
+    assert all(e.settings.rotation == 0 and e.settings.crop is None for e in win.entries)
+    win.batch()
+    wait(app)
+    for i in range(3):
+        assert P.load_image(str(folder / f"blatt{i}.jpg")).data.shape == (400, 300)
+    win.close()
+
+
+def test_replace_asks_before_overwriting(app, tmp_path, monkeypatch):
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from luftbild_editor import batch as B
+    f = str(tmp_path / "a.tif")
+    asked = []
+    monkeypatch.setattr(B.QMessageBox, "question",
+                        lambda *a: asked.append(a[2]) or B.QMessageBox.No)
+    dlg = B.BatchDialog(None, "a.tif", [f], str(tmp_path),
+                        geometries={B.path_key(f): (90.0, None)})
+    dlg.target.setCurrentIndex(dlg.target.findData("replace"))
+    assert not dlg.folder.isEnabled() and not dlg.fmt.isEnabled()
+    dlg._accept()
+    assert dlg.result() != B.BatchDialog.Accepted          # "Nein" -> nichts passiert
+    assert "überschrieben" in asked[-1] and B.BACKUP_DIR in asked[-1]
+    dlg.chk_backup.setChecked(False)
+    dlg._accept()
+    assert "KEINE Sicherungskopie" in asked[-1]
+    job = dlg.job()
+    assert job.overwrite and not job.backup
+    dlg.deleteLater()
+    app.processEvents()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)

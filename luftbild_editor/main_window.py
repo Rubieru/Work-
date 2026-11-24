@@ -205,9 +205,15 @@ class MainWindow(QMainWindow):
         a_del.triggered.connect(self.remove_selected)
         self.image_list.addAction(a_del)
         ll.addWidget(self.image_list)
+        row = QHBoxLayout()
         open_btn = QPushButton("Bilder öffnen…")
         open_btn.clicked.connect(self.open_files)
-        ll.addWidget(open_btn)
+        row.addWidget(open_btn)
+        folder_btn = QPushButton("Ordner öffnen…")
+        folder_btn.setToolTip("Alle Bilder eines Ordners laden (ohne Unterordner).")
+        folder_btn.clicked.connect(self.open_folder)
+        row.addWidget(folder_btn)
+        ll.addLayout(row)
 
         ll.addSpacing(8)
         ll.addWidget(self._heading("Voreinstellungen"))
@@ -693,6 +699,7 @@ class MainWindow(QMainWindow):
             return a
 
         act("Bilder öffnen…", self.open_files, QKeySequence.Open, m_file, True)
+        act("Ordner öffnen…", self.open_folder, QKeySequence("Ctrl+Shift+O"), m_file)
         self.a_export = act("Bild speichern…", self.export_current, QKeySequence.Save,
                             m_file, True)
         self.a_export_all = act("Stapelverarbeitung…", self.batch, QKeySequence("Ctrl+B"),
@@ -728,6 +735,21 @@ class MainWindow(QMainWindow):
         start = os.path.dirname(self.entry.path) if self.entry else ""
         paths, _ = QFileDialog.getOpenFileNames(self, "Luftbilder öffnen", start, IMAGE_FILTER)
         self.add_files(paths)
+
+    def open_folder(self):
+        from .batch import IMAGE_EXTS
+        start = os.path.dirname(self.entry.path) if self.entry else ""
+        d = QFileDialog.getExistingDirectory(self, "Ordner mit Bildern öffnen", start)
+        if not d:
+            return
+        files = [os.path.join(d, n) for n in sorted(os.listdir(d))
+                 if n.lower().endswith(IMAGE_EXTS) and os.path.isfile(os.path.join(d, n))]
+        if not files:
+            QMessageBox.information(self, "Keine Bilder", "In diesem Ordner liegen keine "
+                                    "Bilder (TIF, PNG, JPG, BMP, JP2).")
+            return
+        self.add_files(files)
+        self.statusBar().showMessage(f"{len(files)} Bilder aus {d} geladen.", 8000)
 
     def add_files(self, paths):
         known = {e.path for e in self.entries}
@@ -1825,6 +1847,7 @@ class MainWindow(QMainWindow):
                 e.history.append(e.settings)
                 e.hist_idx = len(e.history) - 1
                 self._update_list_item(e)
+        self._batch_overwrite = job.overwrite
         self._start_progress(f"{len(job.files)} Bilder werden bearbeitet …", cancel=True)
         sig, nodata_safe = self.sig, self.chk_nodata.isChecked()
         self._batch_cancel = False
@@ -1843,7 +1866,11 @@ class MainWindow(QMainWindow):
         text = f"{len(written)} Bilder gespeichert."
         if cancelled:
             text += " (abgebrochen)"
-        if written:
+        if written and getattr(self, "_batch_overwrite", False):
+            self._after_overwrite(written)
+            text += ("\nDie Originale wurden ersetzt. Die Bilder in der Liste zeigen jetzt den "
+                     "gespeicherten Stand; Drehung, Zuschnitt und Regler sind zurückgesetzt.")
+        elif written:
             text += f"\nZielordner: {os.path.dirname(written[0])}"
         if errors:
             text += "\n\nNicht bearbeitet:\n" + "\n".join(
@@ -1851,6 +1878,24 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Stapelverarbeitung", text)
         else:
             QMessageBox.information(self, "Stapelverarbeitung", text)
+
+    def _after_overwrite(self, written):
+        """Ersetzte Bilder neu laden: ihre Einstellungen gehören zum alten Stand und würden
+        bei erneutem Speichern sonst doppelt angewendet."""
+        done = {os.path.normcase(os.path.abspath(p)) for p in written}
+        current_hit = False
+        for e in self.entries:
+            if os.path.normcase(os.path.abspath(e.path)) in done:
+                e.settings = P.Settings()
+                e.history, e.hist_idx = [e.settings], 0
+                e.auto_variant, e.auto_pending = None, False
+                self._update_list_item(e)
+                current_hit = current_hit or e is self.entry
+        self._last_crop = None
+        if current_hit and self.entry in self.entries:
+            row = self.entries.index(self.entry)
+            self.entry = None
+            self._select_image(row)
 
     def _start_progress(self, text, cancel=False):
         self._progress = QProgressDialog(text, "Abbrechen" if cancel else None, 0, 100, self)
