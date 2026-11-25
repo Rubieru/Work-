@@ -200,6 +200,14 @@ class BatchDialog(QDialog):
 
     def _on_target(self, *_):
         replace = self.target.currentData() == "replace"
+        # beim Ersetzen bleibt jedes Bild in seinem Format – deutlich anzeigen
+        if replace and self.fmt.itemData(0) != "orig":
+            self.fmt.insertItem(0, "wie Original (TIFF bleibt TIFF, JPG bleibt JPG)", "orig")
+        if replace:
+            self.fmt.setCurrentIndex(0)
+        elif self.fmt.itemData(0) == "orig":
+            self.fmt.removeItem(0)
+            self.fmt.setCurrentIndex(0)
         self.info.setText(
             "Alle angehakten Bilder werden in voller Auflösung bearbeitet und gespeichert, "
             "eine Georeferenzierung wird übernommen. ✂ = Bild hat einen eigenen "
@@ -288,7 +296,10 @@ class BatchDialog(QDialog):
                  if self.list.item(i).checkState() == Qt.Checked]
         mode = self.geo_mode.currentData()
         own = self.tonal_mode.currentData() == "own"
-        return BatchJob(files, self.folder.text().strip(), self.fmt.currentData(),
+        fmt = self.fmt.currentData()
+        if fmt == "orig":          # beim Ersetzen bestimmt jedes Original sein Format selbst
+            fmt = "tif16"
+        return BatchJob(files, self.folder.text().strip(), fmt,
                         self.suffix.text(), mode == "same", self._auto,
                         self._geometries if mode == "own" else None,
                         self._per_image if own else None,

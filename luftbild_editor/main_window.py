@@ -707,6 +707,8 @@ class MainWindow(QMainWindow):
 
         act("Bilder öffnen…", self.open_files, QKeySequence.Open, m_file, True)
         act("Ordner öffnen…", self.open_folder, QKeySequence("Ctrl+Shift+O"), m_file)
+        m_file.addSeparator()
+        act("Ordner umwandeln (z. B. TIFF → JPEG)…", self.convert_folder, None, m_file)
         self.a_export = act("Bild speichern…", self.export_current, QKeySequence.Save,
                             m_file, True)
         self.a_export_all = act("Stapelverarbeitung…", self.batch, QKeySequence("Ctrl+B"),
@@ -742,6 +744,41 @@ class MainWindow(QMainWindow):
         start = os.path.dirname(self.entry.path) if self.entry else ""
         paths, _ = QFileDialog.getOpenFileNames(self, "Luftbilder öffnen", start, IMAGE_FILTER)
         self.add_files(paths)
+
+    def convert_folder(self):
+        from .convert import ConvertDialog, run_convert
+        start = os.path.dirname(self.entry.path) if self.entry else ""
+        dlg = ConvertDialog(self, start)
+        if dlg.exec() != ConvertDialog.Accepted:
+            return
+        job, files = dlg.job(), dlg._files
+        self._start_progress(f"{len(files)} Dateien werden umgewandelt …", cancel=True)
+        sig = self.sig
+        self._batch_cancel = False
+
+        def fn():
+            return run_convert(job, files, progress=lambda i, n: sig.progress.emit(i, n),
+                               cancelled=lambda: self._batch_cancel)
+
+        self._submit("convert", fn)
+
+    def _done_convert(self, res):
+        cancelled = self._batch_cancel
+        self._close_progress()
+        mb = lambda b: f"{b / 1e6:,.0f}".replace(",", ".")  # noqa: E731
+        text = f"{len(res.written)} Dateien umgewandelt" + (" (abgebrochen)" if cancelled else "")
+        if res.written:
+            text += (f".\nGröße vorher {mb(res.bytes_before)} MB, nachher "
+                     f"{mb(res.bytes_after)} MB.")
+        if res.skipped:
+            text += f"\n\n{len(res.skipped)} übersprungen (Zieldatei gibt es schon):\n" + \
+                "\n".join(f"• {os.path.basename(p)}" for p, _ in res.skipped[:10])
+        if res.errors:
+            text += "\n\nFehler:\n" + "\n".join(
+                f"• {os.path.basename(p)}: {e}" for p, e in res.errors[:10])
+            QMessageBox.warning(self, "Ordner umwandeln", text)
+        else:
+            QMessageBox.information(self, "Ordner umwandeln", text)
 
     def open_folder(self):
         from .batch import IMAGE_EXTS
@@ -898,7 +935,7 @@ class MainWindow(QMainWindow):
             base = kind[6:]
             if base in self._busy:
                 self._busy[base] = False
-            if base in ("load", "export", "batch", "autocrop"):
+            if base in ("load", "export", "batch", "autocrop", "convert"):
                 self._t_loading.stop()
                 self._close_progress()
                 self.statusBar().clearMessage()
@@ -921,7 +958,7 @@ class MainWindow(QMainWindow):
     def _show_error(self, kind, exc):
         names = {"load": "Laden", "export": "Speichern", "batch": "Stapelverarbeitung",
                  "preview": "Vorschau", "detail": "Detailansicht", "thumbs": "Vorschaubilder",
-                 "autocrop": "Automatisch zuschneiden"}
+                 "autocrop": "Automatisch zuschneiden", "convert": "Umwandeln"}
         text = f"Fehler bei {names.get(kind, kind)}: {type(exc).__name__}: {exc}"
         self.statusBar().showMessage(text, 30000)
         if kind not in self._errors_shown:  # jede Fehlerart nur einmal als Fenster

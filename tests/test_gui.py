@@ -600,3 +600,50 @@ def test_orient_buttons_only_rotate_or_crop_and_rotate(app, tmp_path, monkeypatc
     assert e.settings.crop is not None
     assert abs(((e.settings.rotation - 270 + 180) % 360) - 180) <= 2
     win.close()
+
+
+def test_convert_folder_from_menu(app, tmp_path, monkeypatch):
+    from luftbild_editor import convert as C
+    from luftbild_editor.main_window import MainWindow
+    import luftbild_editor.main_window as M
+    monkeypatch.setattr("PySide6.QtCore.QStandardPaths.writableLocation",
+                        lambda *_: str(tmp_path / "cfg"))
+    root = tmp_path / "Projekt"
+    (root / "Teil1").mkdir(parents=True)
+    for i, folder in enumerate((root, root / "Teil1")):
+        P.save_image(str(folder / f"bild{i}.tif"),
+                     P.to_uint(synthetic_aerial(300, 200, seed=i), 16), "tif16")
+
+    def fake_exec(dlg):
+        dlg.folder.setText(str(root))
+        dlg.chk_delete.setChecked(True)
+        dlg._files = C.find_files(dlg.job())
+        return C.ConvertDialog.Accepted
+    monkeypatch.setattr(C.ConvertDialog, "exec", fake_exec)
+    shown = []
+    monkeypatch.setattr(M.QMessageBox, "information", lambda *a: shown.append(a[2]))
+    win = MainWindow()
+    win.convert_folder()
+    wait(app)
+    for _ in range(10):
+        app.processEvents()
+    assert (root / "bild0.jpg").exists() and (root / "Teil1" / "bild1.jpg").exists()
+    assert not (root / "bild0.tif").exists()
+    assert shown and "2 Dateien umgewandelt" in shown[0]
+    win.close()
+
+
+def test_replace_shows_format_as_original(app, tmp_path):
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from luftbild_editor import batch as B
+    f = str(tmp_path / "a.jpg")
+    dlg = B.BatchDialog(None, "a.jpg", [f], str(tmp_path))
+    dlg.target.setCurrentIndex(dlg.target.findData("replace"))
+    assert "wie Original" in dlg.fmt.currentText() and not dlg.fmt.isEnabled()
+    assert dlg.job().overwrite
+    dlg.target.setCurrentIndex(dlg.target.findData("folder"))
+    assert dlg.fmt.currentData() != "orig" and dlg.fmt.isEnabled()
+    assert dlg.job().fmt in P.EXPORT_FORMATS
+    dlg.deleteLater()
+    app.processEvents()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)

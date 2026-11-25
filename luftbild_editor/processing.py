@@ -296,7 +296,7 @@ def to_uint(img: np.ndarray, bits: int, nodata_safe: bool = False) -> np.ndarray
 
 
 def save_image(path: str, arr: np.ndarray, fmt: str, dpi: float | None = None,
-               geo=None, geo_affine=None) -> None:
+               geo=None, geo_affine=None, jpeg_quality: int = 95) -> None:
     if fmt in ("tif16", "tif8") and tifffile is not None:
         kwargs = {"photometric": "rgb" if arr.ndim == 3 else "minisblack",
                   "compression": "zlib"}
@@ -318,7 +318,7 @@ def save_image(path: str, arr: np.ndarray, fmt: str, dpi: float | None = None,
     ext = EXPORT_FORMATS[fmt][1]
     params = []
     if fmt == "jpg":
-        params = [cv2.IMWRITE_JPEG_QUALITY, 95]
+        params = [cv2.IMWRITE_JPEG_QUALITY, int(jpeg_quality)]
     if arr.ndim == 3:
         arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
     ok, enc = cv2.imencode(ext, arr, params)

@@ -102,6 +102,11 @@ Originale vorher in den Unterordner „Originale_Sicherung“ kopiert (die erste
 erhalten). Geschrieben wird erst in eine Zwischendatei; bei einem Fehler bleibt das Original
 unverändert. Danach zeigt die Liste den gespeicherten Stand.
 
+**Ordner umwandeln** (Datei → Ordner umwandeln): alle TIFFs eines Ordners samt Unterordnern
+in JPEG (oder PNG) umwandeln, ohne sie zu bearbeiten – z. B. um Speicherplatz zu sparen.
+JPEG-Qualität einstellbar (Standard 92), Georeferenz bleibt, auf Wunsch werden die TIFFs nach
+erfolgreicher Umwandlung gelöscht; vorhandene JPEGs werden nur mit Häkchen überschrieben.
+
 **Bilderliste:** mehrere Bilder mit Strg/Umschalt + Klick oder Strg+A markieren, dann
 Rechtsklick → „Entfernen“ oder Entf-Taste. Rückgängig/Wiederholen mit Strg+Z und Strg+Y.
 

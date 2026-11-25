@@ -1,2 +1,2 @@
 """Luftbild-Editor: Zuschneiden, Kontrast und Schärfe für historische Luftbilder."""
-__version__ = "0.16.2"
+__version__ = "0.17.0"
